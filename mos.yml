@@ -1,0 +1,31 @@
+author: mongoose-os
+description: PPPoS support
+type: lib
+version: 1.0
+
+platforms: [ esp32 ]
+
+includes: [ include ]
+sources: [ src ]
+
+config_schema:
+  - ["pppos", "o", {title: "PPPoS settings"}]
+  - ["pppos.enable", "b", false, {title: "Enable PPPoS"}]
+  - ["pppos.uart_no", "i", 1, {title: "Which UART to use"}]
+  - ["pppos.baud_rate", "i", 115200, {title: "Baud rate"}]
+  - ["pppos.fc_enable", "b", false, {title: "Enable hardware CTS/RTS flow control"}]
+  # These depend on the operator and are usually well known.
+  - ["pppos.apn", "s", "", {title: "APN name"}]
+  - ["pppos.user", "s", "", {title: "User name"}]
+  - ["pppos.pass", "s", "", {title: "Password"}]
+  - ["pppos.connect_cmd", "s", "ATDT*99***1#", {title: "AT command to send to initiate PPP data mode"}]
+  # Misc settings.
+  - ["pppos.echo_interval", "i", 10, {title: "LCP Echo interval, seconds"}]
+  - ["pppos.echo_fails", "i", 3, {title: "Number of failed echos before connection is declared dead and retried"}]
+  - ["pppos.hexdump_enable", "b", false, {title: "Dump all the data sent over UART to stderr"}]
+
+tags:
+  - hw
+  - net
+
+manifest_version: 2017-09-29
