@@ -1,4 +1,4 @@
-# PPPoS / cellular modem support
+# PPPoS / cellullar modem support
 
 This library provides IP over serial port. Encapsulation is PPP.
 
