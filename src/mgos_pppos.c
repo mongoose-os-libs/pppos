@@ -57,7 +57,7 @@ static SLIST_HEAD(s_pds, mgos_pppos_data) s_pds = SLIST_HEAD_INITIALIZER(s_pds);
 static void mgos_pppos_at_cmd(int uart_no, const char *cmd) {
   LOG(LL_DEBUG, (">> %s", cmd));
   mgos_uart_write(uart_no, cmd, strlen(cmd));
-  mgos_uart_write(uart_no, "\r\n", 2);
+  if (strcmp(cmd, "+++") != 0) mgos_uart_write(uart_no, "\r\n", 2);
 }
 
 static void mgos_pppos_set_state(struct mgos_pppos_data *pd,
@@ -133,9 +133,9 @@ static void prepare_cmds(struct mgos_pppos_data *pd) {
   free_cmds(pd);
   pd->cmds = (char **) calloc(10, sizeof(char *));
   int n = 0;
+  mg_asprintf(&pd->cmds[n++], 0, "ATH");
   mg_asprintf(&pd->cmds[n++], 0, "ATZ");
   mg_asprintf(&pd->cmds[n++], 0, "ATE0");
-  mg_asprintf(&pd->cmds[n++], 0, "ATH");
   mg_asprintf(&pd->cmds[n++], 0, "ATI");
   if (pd->cfg.apn != NULL) {
     mg_asprintf(&pd->cmds[n++], 0, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg.apn);
