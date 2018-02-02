@@ -9,6 +9,7 @@
 #include "netif/ppp/ppp.h"
 #include "netif/ppp/pppos.h"
 
+#include "common/cs_dbg.h"
 #include "common/mbuf.h"
 #include "common/mg_str.h"
 #include "common/queue.h"
