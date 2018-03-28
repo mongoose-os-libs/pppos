@@ -14,7 +14,7 @@
 #include "common/mg_str.h"
 #include "common/queue.h"
 
-#include "mongoose/mongoose.h"
+#include "mongoose.h"
 
 #include "mgos_net_hal.h"
 #include "mgos_sys_config.h"
