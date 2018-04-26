@@ -5,7 +5,6 @@ version: 1.0
 
 platforms: [ esp32 ]
 
-includes: [ include ]
 sources: [ src ]
 
 config_schema:
