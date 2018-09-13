@@ -26,6 +26,7 @@ config_schema:
 tags:
   - hw
   - net
+  - docs:net:PPPoS
 
 manifest_version: 2017-09-29
 
