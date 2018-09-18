@@ -17,7 +17,7 @@
 
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
-#include "lwip/pppapi.h"
+#include "netif/ppp/pppapi.h"
 #include "netif/ppp/ppp.h"
 #include "netif/ppp/pppos.h"
 
