@@ -17,8 +17,8 @@
 
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
-#include "netif/ppp/pppapi.h"
 #include "netif/ppp/ppp.h"
+#include "netif/ppp/pppapi.h"
 #include "netif/ppp/pppos.h"
 
 #include "common/cs_dbg.h"
@@ -29,6 +29,7 @@
 #include "mongoose.h"
 
 #include "mgos_net_hal.h"
+#include "mgos_pppos.h"
 #include "mgos_sys_config.h"
 #include "mgos_system.h"
 #include "mgos_uart.h"
@@ -44,11 +45,13 @@ enum mgos_pppos_state {
   PPPOS_START_PPP,
   PPPOS_RUN,
   PPPOS_CLOSE,
+  PPPOS_USER_CMD,
+  PPPOS_USER_CMD_DONE,
 };
 
 struct mgos_pppos_data {
   int if_instance;
-  struct mgos_config_pppos cfg;
+  const struct mgos_config_pppos *cfg;
   enum mgos_pppos_state state;
   struct mbuf data;
   double deadline;
@@ -56,6 +59,10 @@ struct mgos_pppos_data {
   char **cmds;
   int num_cmds;
   int cmd_idx;
+
+  char *user_cmd;
+  enum mgos_pppos_state interrupted_state;
+  int interrupted_data_len;
 
   struct netif pppif;
   ppp_pcb *pppcb;
@@ -98,11 +105,11 @@ static void mgos_pppos_set_net_status(struct mgos_pppos_data *pd,
 static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
                                 void *ctx) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) ctx;
-  size_t wr_av = mgos_uart_write_avail(pd->cfg.uart_no);
+  size_t wr_av = mgos_uart_write_avail(pd->cfg->uart_no);
   LOG(LL_DEBUG, (">> %d (av %d)", (int) len, (int) wr_av));
   len = MIN(len, wr_av);
-  len = mgos_uart_write(pd->cfg.uart_no, data, len);
-  if (pd->cfg.hexdump_enable) mg_hexdumpf(stderr, data, len);
+  len = mgos_uart_write(pd->cfg->uart_no, data, len);
+  if (pd->cfg->hexdump_enable) mg_hexdumpf(stderr, data, len);
   return len;
 }
 
@@ -127,7 +134,7 @@ static void mgos_pppos_status_cb(ppp_pcb *pcb, int err_code, void *arg) {
       ppp_close(pcb, 0 /* nocarrier */);
       assert(pd->pppcb == NULL);
       mgos_pppos_set_state(pd, PPPOS_START);
-      mgos_uart_schedule_dispatcher(pd->cfg.uart_no, false /* from_isr */);
+      mgos_uart_schedule_dispatcher(pd->cfg->uart_no, false /* from_isr */);
       break;
     }
   }
@@ -150,10 +157,10 @@ static void prepare_cmds(struct mgos_pppos_data *pd) {
   mg_asprintf(&pd->cmds[n++], 0, "ATZ");
   mg_asprintf(&pd->cmds[n++], 0, "ATE0");
   mg_asprintf(&pd->cmds[n++], 0, "ATI");
-  if (pd->cfg.apn != NULL) {
-    mg_asprintf(&pd->cmds[n++], 0, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg.apn);
+  if (pd->cfg->apn != NULL) {
+    mg_asprintf(&pd->cmds[n++], 0, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg->apn);
   }
-  mg_asprintf(&pd->cmds[n++], 0, "%s", pd->cfg.connect_cmd);
+  mg_asprintf(&pd->cmds[n++], 0, "%s", pd->cfg->connect_cmd);
   pd->num_cmds = n;
   pd->cmd_idx = 0;
 }
@@ -166,16 +173,16 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
     size_t nr = mgos_uart_read_mbuf(uart_no, &pd->data, rx_av);
     if (nr > 0) {
       LOG(LL_DEBUG, ("<< %d", (int) nr));
-      if (pd->cfg.hexdump_enable) {
+      if (pd->cfg->hexdump_enable) {
         mg_hexdumpf(stderr, pd->data.buf, pd->data.len);
       }
     }
   }
   switch (pd->state) {
     case PPPOS_START: {
-      const char *apn = pd->cfg.apn;
+      const char *apn = pd->cfg->apn;
       mgos_pppos_set_net_status(pd, MGOS_NET_EV_DISCONNECTED);
-      LOG(LL_INFO, ("Connecting (UART%d, APN '%s')...", pd->cfg.uart_no,
+      LOG(LL_INFO, ("Connecting (UART%d, APN '%s')...", pd->cfg->uart_no,
                     (apn ? apn : "")));
       mbuf_free(&pd->data);
       mbuf_init(&pd->data, 0);
@@ -196,8 +203,6 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
       } else if (now > pd->deadline) {
         mgos_pppos_set_state(pd, PPPOS_ENTER);
       }
-      /* Discard all the incoming data. */
-      mbuf_remove(&pd->data, pd->data.len);
       break;
     }
     case PPPOS_ENTER: {
@@ -207,10 +212,52 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
         pd->deadline = now + 1.2;
       } else if (now > pd->deadline) {
         mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTING);
-        mgos_pppos_set_state(pd, PPPOS_SETUP);
+        if (pd->user_cmd) {
+          mgos_pppos_set_state(pd, PPPOS_USER_CMD);
+        } else {
+          mgos_pppos_set_state(pd, PPPOS_SETUP);
+          mbuf_remove(&pd->data, pd->data.len);
+        }
       }
-      /* Keep discarding all the data. */
-      mbuf_remove(&pd->data, pd->data.len);
+      break;
+    }
+    case PPPOS_USER_CMD: {
+      const char *eol;
+      struct mg_str s = mg_mk_str_n(pd->data.buf + pd->interrupted_data_len,
+                                    pd->data.len - pd->interrupted_data_len);
+      if (pd->deadline == 0) {
+        mgos_pppos_at_cmd(uart_no, pd->user_cmd);
+        pd->deadline = now + AT_CMD_TIMEOUT;
+        pd->interrupted_data_len = pd->data.len;
+      } else if (now > pd->deadline) {
+        LOG(LL_INFO, ("Command timed out: %s", pd->user_cmd));
+        free(pd->user_cmd);
+        pd->user_cmd = NULL;
+        mgos_pppos_set_state(pd, pd->interrupted_state);
+      } else if ((eol = mg_strchr(s, '\r')) != NULL) {
+        /* Trigger event */
+        struct mgos_pppos_cmd_resp data = {
+            .iface = pd->if_instance,
+            .request = mg_mk_str(pd->user_cmd),
+            .response = s,
+        };
+        mgos_event_trigger(MGOS_PPPOS_CMD_RESP, &data);
+        free(pd->user_cmd);
+        pd->user_cmd = NULL;
+        pd->data.len = pd->interrupted_data_len;
+        mgos_pppos_at_cmd(uart_no, "ATO");
+        mgos_pppos_set_state(pd, PPPOS_USER_CMD_DONE);
+        pd->deadline = now + AT_CMD_TIMEOUT;
+      }
+      break;
+    }
+    case PPPOS_USER_CMD_DONE: {
+      mgos_pppos_set_state(pd, pd->interrupted_state);
+      struct mg_str s = mg_mk_str_n(pd->data.buf + pd->interrupted_data_len,
+                                    pd->data.len - pd->interrupted_data_len);
+      if (mg_strchr(s, '\r') == NULL && now < pd->deadline) break;
+      mgos_pppos_set_state(pd, pd->interrupted_state);
+      pd->data.len = pd->interrupted_data_len;
       break;
     }
     case PPPOS_SETUP: {
@@ -259,7 +306,7 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
       break;
     }
     case PPPOS_START_PPP: {
-      const char *user = pd->cfg.user;
+      const char *user = pd->cfg->user;
       LOG(LL_INFO, ("Starting PPP, user '%s'", (user ? user : "")));
       mbuf_remove(&pd->data, pd->data.len);
       pd->pppcb = pppapi_pppos_create(&pd->pppif, mgos_pppos_send_cb,
@@ -271,10 +318,10 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
         break;
       }
       if (user != NULL) {
-        pppapi_set_auth(pd->pppcb, PPPAUTHTYPE_PAP, user, pd->cfg.pass);
+        pppapi_set_auth(pd->pppcb, PPPAUTHTYPE_PAP, user, pd->cfg->pass);
       }
-      pd->pppcb->settings.lcp_echo_interval = pd->cfg.echo_interval;
-      pd->pppcb->settings.lcp_echo_fails = pd->cfg.echo_fails;
+      pd->pppcb->settings.lcp_echo_interval = pd->cfg->echo_interval;
+      pd->pppcb->settings.lcp_echo_fails = pd->cfg->echo_fails;
       err_t err = pppapi_connect(pd->pppcb, 0 /* holdoff */);
       if (err != ERR_OK) {
         LOG(LL_ERROR, ("pppapi_connect failed: %d", err));
@@ -315,6 +362,25 @@ bool mgos_pppos_dev_get_ip_info(int if_instance,
   return false;
 }
 
+bool mgos_pppos_send_cmd(int iface, const char *req) {
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    if (pd->if_instance == iface && pd->user_cmd == NULL) {
+      mg_asprintf(&pd->user_cmd, 0, "%s", req);
+      if (pd->state == PPPOS_RUN) {
+        pd->interrupted_state = PPPOS_RUN;
+        pd->state = PPPOS_ENTER_WAIT;
+      } else {
+        pd->interrupted_state = PPPOS_START;
+        pd->state = PPPOS_START;
+      }
+      mgos_uart_schedule_dispatcher(pd->cfg->uart_no, false);
+      return true;
+    }
+  }
+  return false;
+}
+
 bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
   if (cfg->connect_cmd == NULL) {
     LOG(LL_ERROR, ("connect_cmd is required"));
@@ -338,7 +404,7 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
   }
   struct mgos_pppos_data *pd =
       (struct mgos_pppos_data *) calloc(1, sizeof(*pd));
-  memcpy(&pd->cfg, cfg, sizeof(pd->cfg));
+  pd->cfg = cfg;
   pd->if_instance = if_instance;
   pd->state = PPPOS_START;
   SLIST_INSERT_HEAD(&s_pds, pd, next);
@@ -349,5 +415,6 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
 
 bool mgos_pppos_init(void) {
   if (!mgos_sys_config_get_pppos_enable()) return true;
+  mgos_event_register_base(MGOS_PPPOS_BASE, "pppos");
   return mgos_pppos_create(&mgos_sys_config.pppos, 0 /* if_instance */);
 }

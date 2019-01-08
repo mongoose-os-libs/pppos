@@ -15,9 +15,10 @@
  * limitations under the License.
  */
 
-#ifndef CS_MOS_LIBS_PPPOS_SRC_MGOS_PPPOS_H_
-#define CS_MOS_LIBS_PPPOS_SRC_MGOS_PPPOS_H_
+#ifndef CS_MOS_LIBS_PPPOS_INCLUDE_MGOS_PPPOS_H_
+#define CS_MOS_LIBS_PPPOS_INCLUDE_MGOS_PPPOS_H_
 
+#include "mgos_event.h"
 #include "mgos_net.h"
 
 #ifdef __cplusplus
@@ -32,8 +33,22 @@ extern "C" {
 bool mgos_pppos_dev_get_ip_info(int if_instance,
                                 struct mgos_net_ip_info *ip_info);
 
+#define MGOS_PPPOS_BASE MGOS_EVENT_BASE('P', 'o', 'S')
+
+enum mgos_pppos_event {
+  MGOS_PPPOS_CMD_RESP = MGOS_PPPOS_BASE,  // ev_data: struct mgos_pppos_cmd_resp
+};
+
+struct mgos_pppos_cmd_resp {
+  int iface;
+  struct mg_str request;
+  struct mg_str response;
+};
+
+bool mgos_pppos_send_cmd(int iface, const char *req);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
 
-#endif /* CS_MOS_LIBS_PPPOS_SRC_MGOS_PPPOS_H_ */
+#endif /* CS_MOS_LIBS_PPPOS_INCLUDE_MGOS_PPPOS_H_ */
