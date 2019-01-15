@@ -15,21 +15,24 @@
  * limitations under the License.
  */
 
-#include "lwip/ip_addr.h"
-#include "lwip/netif.h"
-#include "netif/ppp/ppp.h"
-#include "netif/ppp/pppapi.h"
-#include "netif/ppp/pppos.h"
+#include "mgos_pppos.h"
 
 #include "common/cs_dbg.h"
 #include "common/mbuf.h"
 #include "common/mg_str.h"
 #include "common/queue.h"
 
+#include "lwip/tcpip.h"
+#include "lwip/ip_addr.h"
+#include "lwip/netif.h"
+#include "netif/ppp/ppp.h"
+#include "netif/ppp/pppapi.h"
+#include "netif/ppp/pppos.h"
+
 #include "mongoose.h"
 
+#include "mgos_gpio.h"
 #include "mgos_net_hal.h"
-#include "mgos_pppos.h"
 #include "mgos_sys_config.h"
 #include "mgos_system.h"
 #include "mgos_uart.h"
@@ -110,6 +113,7 @@ static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
   len = MIN(len, wr_av);
   len = mgos_uart_write(pd->cfg->uart_no, data, len);
   if (pd->cfg->hexdump_enable) mg_hexdumpf(stderr, data, len);
+  (void) pcb;
   return len;
 }
 
@@ -163,6 +167,31 @@ static void prepare_cmds(struct mgos_pppos_data *pd) {
   mg_asprintf(&pd->cmds[n++], 0, "%s", pd->cfg->connect_cmd);
   pd->num_cmds = n;
   pd->cmd_idx = 0;
+}
+
+struct ppp_set_auth_arg {
+  u8_t authtype;
+  const char *user;
+  const char *passwd;
+};
+
+static err_t pppapi_do_ppp_set_auth(struct tcpip_api_call_data *m) {
+  struct pppapi_msg *msg = (struct pppapi_msg *) m;
+  struct ppp_set_auth_arg *aa =
+      (struct ppp_set_auth_arg *) msg->msg.msg.ioctl.arg;
+  ppp_set_auth(msg->msg.ppp, aa->authtype, aa->user, aa->passwd);
+  return ERR_OK;
+}
+
+static void pppos_set_auth(ppp_pcb *pcb, u8_t authtype, const char *user,
+                           const char *passwd) {
+  struct ppp_set_auth_arg auth_arg = {
+      .authtype = authtype, .user = user, .passwd = passwd,
+  };
+  struct pppapi_msg msg = {
+      .msg.ppp = pcb, .msg.msg.ioctl.arg = &auth_arg,
+  };
+  tcpip_api_call(pppapi_do_ppp_set_auth, &msg.call);
 }
 
 static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
@@ -318,7 +347,7 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
         break;
       }
       if (user != NULL) {
-        pppapi_set_auth(pd->pppcb, PPPAUTHTYPE_PAP, user, pd->cfg->pass);
+        pppos_set_auth(pd->pppcb, PPPAUTHTYPE_PAP, user, pd->cfg->pass);
       }
       pd->pppcb->settings.lcp_echo_interval = pd->cfg->echo_interval;
       pd->pppcb->settings.lcp_echo_fails = pd->cfg->echo_fails;
