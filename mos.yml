@@ -9,6 +9,10 @@ config_schema:
   - ["pppos.uart_no", "i", 1, {title: "Which UART to use"}]
   - ["pppos.baud_rate", "i", 115200, {title: "Baud rate"}]
   - ["pppos.fc_enable", "b", false, {title: "Enable hardware CTS/RTS flow control"}]
+  - ["pppos.rx_gpio", "i", -1, {title: "RX pin; -1 = use default"}]
+  - ["pppos.tx_gpio", "i", -1, {title: "TX pin; -1 = use default"}]
+  - ["pppos.cts_gpio", "i", -1, {title: "CTS pin; -1 = use default"}]
+  - ["pppos.rts_gpio", "i", -1, {title: "RTS pin; -1 = use default"}]
   # These depend on the operator and are usually well known.
   - ["pppos.apn", "s", "", {title: "APN name"}]
   - ["pppos.user", "s", "", {title: "User name"}]

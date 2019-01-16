@@ -228,7 +228,7 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
     case PPPOS_ENTER_WAIT: {
       if (pd->deadline == 0) {
         /* Initial 1s pause before sending +++ */
-        pd->deadline = now + 1.0;
+        pd->deadline = now + 1.2;
       } else if (now > pd->deadline) {
         mgos_pppos_set_state(pd, PPPOS_ENTER);
       }
@@ -424,9 +424,60 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
     ucfg.rx_fc_type = MGOS_UART_FC_HW;
     ucfg.tx_fc_type = MGOS_UART_FC_HW;
   }
+#if CS_PLATFORM == CS_P_ESP32
+  if (mgos_sys_config_get_pppos_rx_gpio() >= 0) {
+    ucfg.dev.rx_gpio = mgos_sys_config_get_pppos_rx_gpio();
+  }
+  if (mgos_sys_config_get_pppos_tx_gpio() >= 0) {
+    ucfg.dev.tx_gpio = mgos_sys_config_get_pppos_tx_gpio();
+  }
+  if (mgos_sys_config_get_pppos_cts_gpio() >= 0) {
+    ucfg.dev.cts_gpio = mgos_sys_config_get_pppos_cts_gpio();
+  }
+  if (mgos_sys_config_get_pppos_rts_gpio() >= 0) {
+    ucfg.dev.rts_gpio = mgos_sys_config_get_pppos_rts_gpio();
+  }
+  char b1[8], b2[8], b3[8], b4[8];
+  LOG(LL_INFO, ("PPPoS UART%d (RX:%s TX:%s CTS:%s RTS:%s), %d, fc %s, APN '%s'",
+                cfg->uart_no, mgos_gpio_str(ucfg.dev.rx_gpio, b1),
+                mgos_gpio_str(ucfg.dev.tx_gpio, b2),
+                mgos_gpio_str(ucfg.dev.cts_gpio, b3),
+                mgos_gpio_str(ucfg.dev.rts_gpio, b4), ucfg.baud_rate,
+                cfg->fc_enable ? "on" : "off", (cfg->apn ? cfg->apn : "")));
+#else
+#if CS_PLATFORM == CS_P_STM32
+  if (mgos_sys_config_get_pppos_rx_gpio() >= 0) {
+    ucfg.dev.pins.rx = mgos_sys_config_get_pppos_rx_gpio();
+  }
+  if (mgos_sys_config_get_pppos_tx_gpio() >= 0) {
+    ucfg.dev.pins.tx = mgos_sys_config_get_pppos_tx_gpio();
+  }
+  if (mgos_sys_config_get_pppos_cts_gpio() >= 0) {
+    ucfg.dev.pins.cts = mgos_sys_config_get_pppos_cts_gpio();
+  }
+  if (mgos_sys_config_get_pppos_rts_gpio() >= 0) {
+    ucfg.dev.pins.rts = mgos_sys_config_get_pppos_rts_gpio();
+  }
+  char b1[8], b2[8], b3[8], b4[8];
+  LOG(LL_INFO, ("PPPoS UART%d (RX:%s TX:%s CTS:%s RTS:%s), %d, fc %s, APN '%s'",
+                cfg->uart_no, mgos_gpio_str(ucfg.dev.pins.rx, b1),
+                mgos_gpio_str(ucfg.dev.pins.tx, b2),
+                mgos_gpio_str(ucfg.dev.pins.cts, b3),
+                mgos_gpio_str(ucfg.dev.pins.rts, b4), ucfg.baud_rate,
+                cfg->fc_enable ? "on" : "off", (cfg->apn ? cfg->apn : "")));
+#else
+  if (mgos_sys_config_get_pppos_rx_gpio() >= 0 ||
+      mgos_sys_config_get_pppos_tx_gpio() >= 0 ||
+      mgos_sys_config_get_pppos_cts_gpio() >= 0 ||
+      mgos_sys_config_get_pppos_rts_gpio() >= 0) {
+    LOG(LL_ERROR, ("Setting UART pins is not supported on this platform"));
+    return false;
+  }
   LOG(LL_INFO,
-      ("PPPoS UART%d, %d, fc %s, APN '%s'", cfg->uart_no, ucfg.baud_rate,
+      ("PPPoS UART%d %d, fc %s, APN '%s'", cfg->uart_no, ucfg.baud_rate,
        cfg->fc_enable ? "on" : "off", (cfg->apn ? cfg->apn : "")));
+#endif
+#endif
   if (!mgos_uart_configure(cfg->uart_no, &ucfg)) {
     LOG(LL_ERROR, ("Failed to configure UART%d", cfg->uart_no));
     return false;

@@ -15,15 +15,16 @@
  * limitations under the License.
  */
 
-#ifndef CS_MOS_LIBS_PPPOS_INCLUDE_MGOS_PPPOS_H_
-#define CS_MOS_LIBS_PPPOS_INCLUDE_MGOS_PPPOS_H_
+#pragma once
+
+#include <stdbool.h>
 
 #include "mgos_event.h"
 #include "mgos_net.h"
 
 #ifdef __cplusplus
 extern "C" {
-#endif /* __cplusplus */
+#endif
 
 /*
  * Retrieve IP configuration of the provided instance number (which should be
@@ -47,8 +48,8 @@ struct mgos_pppos_cmd_resp {
 
 bool mgos_pppos_send_cmd(int iface, const char *req);
 
+bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance);
+
 #ifdef __cplusplus
 }
-#endif /* __cplusplus */
-
-#endif /* CS_MOS_LIBS_PPPOS_INCLUDE_MGOS_PPPOS_H_ */
+#endif
