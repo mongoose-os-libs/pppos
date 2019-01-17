@@ -50,6 +50,10 @@ bool mgos_pppos_send_cmd(int iface, const char *req);
 
 bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance);
 
+bool mgos_pppos_connect(int if_instance);
+
+bool mgos_pppos_disconnect(int if_instance);
+
 #ifdef __cplusplus
 }
 #endif
