@@ -22,9 +22,9 @@
 #include "common/mg_str.h"
 #include "common/queue.h"
 
-#include "lwip/tcpip.h"
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
+#include "lwip/tcpip.h"
 #include "netif/ppp/ppp.h"
 #include "netif/ppp/pppapi.h"
 #include "netif/ppp/pppos.h"
@@ -95,7 +95,11 @@ static SLIST_HEAD(s_pds, mgos_pppos_data) s_pds = SLIST_HEAD_INITIALIZER(s_pds);
 /* If we fail to communicate with the modem at the specified rate,
  * we will try these (with no flow control), in this order. */
 static const int s_baud_rates[] = {0 /* first we try the confgured rate */,
-                                   9600, 115200, 230400, 460800, 921600};
+                                   9600,
+                                   115200,
+                                   230400,
+                                   460800,
+                                   921600};
 
 static void mgos_pppos_try_baud_rate(struct mgos_pppos_data *pd) {
   struct mgos_uart_config ucfg;
@@ -678,6 +682,22 @@ bool mgos_pppos_disconnect(int if_instance) {
     return true;
   }
   return false;
+}
+
+struct mg_str mgos_pppos_get_imsi(int if_instance) {
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    if (pd->if_instance == if_instance) return mg_strdup(pd->cimi_resp);
+  }
+  return mg_mk_str_n(NULL, 0);
+}
+
+struct mg_str mgos_pppos_get_imei(int if_instance) {
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    if (pd->if_instance == if_instance) return mg_strdup(pd->ati_resp);
+  }
+  return mg_mk_str_n(NULL, 0);
 }
 
 bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {

@@ -47,12 +47,11 @@ struct mgos_pppos_cmd_resp {
 };
 
 bool mgos_pppos_send_cmd(int iface, const char *req);
-
 bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance);
-
 bool mgos_pppos_connect(int if_instance);
-
 bool mgos_pppos_disconnect(int if_instance);
+struct mg_str mgos_pppos_get_imei(int if_instance);
+struct mg_str mgos_pppos_get_imsi(int if_instance);
 
 #ifdef __cplusplus
 }
