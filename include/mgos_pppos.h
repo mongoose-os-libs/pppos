@@ -38,6 +38,8 @@ bool mgos_pppos_dev_get_ip_info(int if_instance,
 
 enum mgos_pppos_event {
   MGOS_PPPOS_CMD_RESP = MGOS_PPPOS_BASE,  // ev_data: struct mgos_pppos_cmd_resp
+  MGOS_PPPOS_GOT_IMSI,                    // ev_data: struct mg_str with IMSI
+  MGOS_PPPOS_GOT_IMEI,                    // ev_data: struct mg_str with IMEI
 };
 
 struct mgos_pppos_cmd_resp {

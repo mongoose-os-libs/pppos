@@ -95,11 +95,7 @@ static SLIST_HEAD(s_pds, mgos_pppos_data) s_pds = SLIST_HEAD_INITIALIZER(s_pds);
 /* If we fail to communicate with the modem at the specified rate,
  * we will try these (with no flow control), in this order. */
 static const int s_baud_rates[] = {0 /* first we try the confgured rate */,
-                                   9600,
-                                   115200,
-                                   230400,
-                                   460800,
-                                   921600};
+                                   9600, 115200, 230400, 460800, 921600};
 
 static void mgos_pppos_try_baud_rate(struct mgos_pppos_data *pd) {
   struct mgos_uart_config ucfg;
@@ -234,6 +230,7 @@ static bool mgos_pppos_gsn_cb(struct mgos_pppos_data *pd, bool ok,
   }
   LOG(LL_INFO, ("%.*s, IMEI: %.*s", (int) pd->ati_resp.len, pd->ati_resp.p,
                 (int) data.len, data.p));
+  mgos_event_trigger(MGOS_PPPOS_GOT_IMEI, &pd->ati_resp);
   mg_strfree(&pd->ati_resp);
   return true;
 }
@@ -301,6 +298,7 @@ static bool mgos_pppos_cpin_cb(struct mgos_pppos_data *pd, bool ok,
     struct mg_str imsi = pd->cimi_resp;
     if (imsi.len == 0) imsi = mg_mk_str("unknown");
     LOG(LL_INFO, ("SIM is ready, IMSI: %.*s", (int) imsi.len, imsi.p));
+    mgos_event_trigger(MGOS_PPPOS_GOT_IMSI, &imsi);
     mg_strfree(&pd->cimi_resp);
   } else {
     LOG(LL_WARN,
