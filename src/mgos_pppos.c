@@ -35,6 +35,7 @@
 #include "mgos_net_hal.h"
 #include "mgos_sys_config.h"
 #include "mgos_system.h"
+#include "mgos_timers.h"
 #include "mgos_uart.h"
 #include "mgos_utils.h"
 
@@ -92,6 +93,8 @@ struct mgos_pppos_cmd {
 
 static SLIST_HEAD(s_pds, mgos_pppos_data) s_pds = SLIST_HEAD_INITIALIZER(s_pds);
 
+static mgos_timer_id s_poll_timer_id = MGOS_INVALID_TIMER_ID;
+
 /* If we fail to communicate with the modem at the specified rate,
  * we will try these (with no flow control), in this order. */
 static const int s_baud_rates[] = {0 /* first we try the confgured rate */,
@@ -102,7 +105,8 @@ static void mgos_pppos_try_baud_rate(struct mgos_pppos_data *pd) {
   if (!mgos_uart_config_get(pd->cfg->uart_no, &ucfg)) return;
   if (pd->try_baud_idx == 0) {
     ucfg.baud_rate = pd->cfg->start_baud_rate;
-    ucfg.rx_fc_type = ucfg.tx_fc_type = MGOS_UART_FC_NONE;
+    ucfg.rx_fc_type = ucfg.tx_fc_type =
+        (pd->cfg->start_fc_enable ? MGOS_UART_FC_HW : MGOS_UART_FC_NONE);
   } else {
     ucfg.baud_rate = s_baud_rates[pd->try_baud_idx];
     ucfg.rx_fc_type = ucfg.tx_fc_type = MGOS_UART_FC_NONE;
@@ -157,6 +161,11 @@ static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
                                 void *ctx) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) ctx;
   size_t wr_av = mgos_uart_write_avail(pd->cfg->uart_no);
+  if (wr_av < len) {
+    /* Can't send all - don't send any. Caller does not expect partial
+     * transmissions. */
+    return 0;
+  }
   LOG(LL_DEBUG, ("> %d (av %d)", (int) len, (int) wr_av));
   len = MIN(len, wr_av);
   len = mgos_uart_write(pd->cfg->uart_no, data, len);
@@ -213,6 +222,16 @@ static void add_cmd(struct mgos_pppos_data *pd, mgos_pppos_cmd_cb_t cb,
   cmd->cb = cb;
   pd->num_cmds++;
   va_end(ap);
+}
+
+static bool mgos_pppos_at_cb(struct mgos_pppos_data *pd, bool ok,
+                             struct mg_str data) {
+  /* Some modems (Sequans) don't like +++ when there's no data session
+   * and send "ERROR". Ignore it. */
+  (void) pd;
+  (void) ok;
+  (void) data;
+  return true;
 }
 
 static bool mgos_pppos_ati_cb(struct mgos_pppos_data *pd, bool ok,
@@ -351,9 +370,21 @@ static bool mgos_pppos_creg_cb(struct mgos_pppos_data *pd, bool ok,
     LOG(LL_ERROR, ("Connected to mobile network (%s)", sts));
   } else {
     LOG(LL_ERROR, ("Not connected to mobile network, status %d (%s)", st, sts));
+    pd->cmd_idx--;
+    ok = true;
   }
   (void) pd;
   return ok;
+}
+
+static bool mgos_pppos_csq_cb(struct mgos_pppos_data *pd, bool ok,
+                              struct mg_str data) {
+  if (!ok) return true;
+  int sq, ber;
+  if (sscanf(data.p, "+CSQ: %d,%d", &sq, &ber) != 2) return true;
+  LOG(LL_INFO, ("Signal quality: %d", sq));
+  (void) pd;
+  return true;
 }
 
 struct ppp_set_auth_arg {
@@ -391,6 +422,11 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
     }
     case PPPOS_START: {
       const char *apn = pd->cfg->apn;
+      if (apn == NULL) {
+        LOG(LL_ERROR, ("APN is not set"));
+        mgos_pppos_set_state(pd, PPPOS_IDLE);
+        break;
+      }
       mgos_pppos_set_net_status(pd, MGOS_NET_EV_DISCONNECTED);
       LOG(LL_INFO, ("Connecting (UART%d, APN '%s')...", pd->cfg->uart_no,
                     (apn ? apn : "")));
@@ -405,6 +441,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       pd->net_status = MGOS_NET_EV_DISCONNECTED;
       pd->net_status_last_reported = MGOS_NET_EV_DISCONNECTED;
       free_cmds(pd);
+      add_cmd(pd, mgos_pppos_at_cb, "AT");
       add_cmd(pd, NULL, "ATH");
       add_cmd(pd, NULL, "ATZ");
       add_cmd(pd, NULL, "ATE0");
@@ -417,7 +454,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       add_cmd(pd, mgos_pppos_ifc_cb, "AT+IFC=%d,%d", ifc, ifc);
       add_cmd(pd, mgos_pppos_cimi_cb, "AT+CIMI");
       add_cmd(pd, mgos_pppos_cpin_cb, "AT+CPIN?");
+      add_cmd(pd, NULL, "AT+CFUN=1"); /* Full functionality */
       add_cmd(pd, mgos_pppos_creg_cb, "AT+CREG?");
+      add_cmd(pd, mgos_pppos_csq_cb, "AT+CSQ?");
       add_cmd(pd, NULL, "AT+CREG=0"); /* Disable unsolicited reports */
       if (pd->cfg->apn != NULL) {
         add_cmd(pd, NULL, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg->apn);
@@ -599,6 +638,12 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
   }
 }
 
+static void mgos_pppos_dispatch(struct mgos_pppos_data *pd) {
+  do {
+    mgos_pppos_dispatch_once(pd);
+  } while (pd->state == PPPOS_START && pd->deadline == 0);
+}
+
 static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) arg;
   size_t rx_av = mgos_uart_read_avail(uart_no);
@@ -611,9 +656,7 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
       }
     }
   }
-  do {
-    mgos_pppos_dispatch_once(pd);
-  } while (pd->state == PPPOS_START && pd->deadline == 0);
+  mgos_pppos_dispatch(pd);
 }
 
 bool mgos_pppos_dev_get_ip_info(int if_instance,
@@ -653,13 +696,24 @@ bool mgos_pppos_send_cmd(int iface, const char *req) {
   return false;
 }
 
+static void mgos_pppos_poll_timer_cb(void *arg) {
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    mgos_pppos_dispatch(pd);
+  }
+}
+
 bool mgos_pppos_connect(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance != if_instance) continue;
     if (pd->state != PPPOS_IDLE) return false;
     mgos_pppos_set_state(pd, PPPOS_START);
-    mgos_pppos_dispatch_once(pd);
+    if (s_poll_timer_id == MGOS_INVALID_TIMER_ID) {
+      s_poll_timer_id = mgos_set_timer(2000, MGOS_TIMER_REPEAT,
+                                       mgos_pppos_poll_timer_cb, NULL);
+    }
+    mgos_pppos_dispatch(pd);
     return true;
   }
   return false;
@@ -676,7 +730,7 @@ bool mgos_pppos_disconnect(int if_instance) {
       pppapi_close(pppcb, 0 /* no_carrier */);
     }
     mgos_pppos_set_state(pd, PPPOS_IDLE);
-    mgos_pppos_dispatch_once(pd);
+    mgos_pppos_dispatch(pd);
     return true;
   }
   return false;
@@ -703,9 +757,10 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
   mgos_uart_config_set_defaults(cfg->uart_no, &ucfg);
   ucfg.baud_rate = cfg->start_baud_rate;
   ucfg.rx_buf_size = 1500;
+  /* TX buffer must be greater than PPP interface MTU. */
   ucfg.tx_buf_size = 1500;
-  // Even if FC should be enabled, the modem starts with it off.
-  ucfg.rx_fc_type = ucfg.tx_fc_type = MGOS_UART_FC_NONE;
+  ucfg.rx_fc_type = ucfg.tx_fc_type =
+      (cfg->start_fc_enable ? MGOS_UART_FC_HW : MGOS_UART_FC_NONE);
 #if CS_PLATFORM == CS_P_ESP32
   if (mgos_sys_config_get_pppos_rx_gpio() >= 0) {
     ucfg.dev.rx_gpio = mgos_sys_config_get_pppos_rx_gpio();

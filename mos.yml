@@ -10,6 +10,7 @@ config_schema:
   - ["pppos.baud_rate", "i", 115200, {title: "Baud rate to use for data transfer"}]
   - ["pppos.start_baud_rate", "i", 115200, {title: "Starting baud rate, used for initial configuration"}]
   - ["pppos.fc_enable", "b", false, {title: "Enable hardware CTS/RTS flow control"}]
+  - ["pppos.start_fc_enable", "b", false, {title: "Enable hardware CTS/RTS flow control for initial configuration"}]
   - ["pppos.rx_gpio", "i", -1, {title: "RX pin; -1 = use default"}]
   - ["pppos.tx_gpio", "i", -1, {title: "TX pin; -1 = use default"}]
   - ["pppos.cts_gpio", "i", -1, {title: "CTS pin; -1 = use default"}]
