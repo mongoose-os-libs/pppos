@@ -20,6 +20,12 @@ config_schema:
   - ["pppos.user", "s", "", {title: "User name"}]
   - ["pppos.pass", "s", "", {title: "Password"}]
   - ["pppos.connect_on_startup", "b", true, {title: "Connect immediately on startup"}]
+  # Reset settings. If not set, driver will not perform reset and app should manage modem power on its own.
+  - ["pppos.rst_gpio", "i", -1, {title: "Reset pin; -1 = no reset"}]
+  - ["pppos.rst_act", "i", 0, {title: "Active level, 0 or 1"}]
+  - ["pppos.rst_hold_ms", "i", 100, {title: "Time to hold reset pin in active state"}]
+  - ["pppos.rst_wait_ms", "i", 5000, {title: "Time to wait after reset before initializing"}]
+  - ["pppos.rst_mode", "i", 0, {title: "Reset mode: 0 - on first connect only, 1 - on every connect"}]
   # Misc settings.
   - ["pppos.echo_interval", "i", 10, {title: "LCP Echo interval, seconds"}]
   - ["pppos.echo_fails", "i", 3, {title: "Number of failed echos before connection is declared dead and retried"}]

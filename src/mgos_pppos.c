@@ -35,6 +35,7 @@
 #include "mgos_net_hal.h"
 #include "mgos_sys_config.h"
 #include "mgos_system.h"
+#include "mgos_time.h"
 #include "mgos_timers.h"
 #include "mgos_uart.h"
 #include "mgos_utils.h"
@@ -43,15 +44,19 @@
 
 enum mgos_pppos_state {
   PPPOS_IDLE = 0,
-  PPPOS_START,
-  PPPOS_ENTER_WAIT,
-  PPPOS_ENTER,
-  PPPOS_SETUP,
-  PPPOS_START_PPP,
-  PPPOS_RUN,
-  PPPOS_CLOSE,
-  PPPOS_USER_CMD,
-  PPPOS_USER_CMD_DONE,
+  PPPOS_INIT = 1,
+  PPPOS_RESET = 2,
+  PPPOS_RESET_HOLD = 3,
+  PPPOS_RESET_WAIT = 4,
+  PPPOS_BEGIN_WAIT = 5,
+  PPPOS_BEGIN = 6,
+  PPPOS_SETUP = 7,
+  PPPOS_CMD = 8,
+  PPPOS_CMD_RESP = 9,
+  PPPOS_START_PPP = 10,
+  PPPOS_RUN = 11,
+  PPPOS_USER_CMD = 12,
+  PPPOS_USER_CMD_DONE = 13,
 };
 
 struct mgos_pppos_cmd;
@@ -61,8 +66,10 @@ struct mgos_pppos_data {
   const struct mgos_config_pppos *cfg;
   enum mgos_pppos_state state;
   struct mbuf data;
-  double deadline;
+  double delay, deadline;
   bool baud_ok;
+  int attempt;
+  mgos_timer_id poll_timer_id;
 
   struct mgos_pppos_cmd *cmds;
   int num_cmds;
@@ -93,12 +100,12 @@ struct mgos_pppos_cmd {
 
 static SLIST_HEAD(s_pds, mgos_pppos_data) s_pds = SLIST_HEAD_INITIALIZER(s_pds);
 
-static mgos_timer_id s_poll_timer_id = MGOS_INVALID_TIMER_ID;
-
 /* If we fail to communicate with the modem at the specified rate,
  * we will try these (with no flow control), in this order. */
-static const int s_baud_rates[] = {0 /* first we try the confgured rate */,
-                                   9600, 115200, 230400, 460800, 921600};
+static const int s_baud_rates[] = {
+    0 /* first we try the configured rate */, 9600, 115200, 230400, 460800,
+    921600,
+};
 
 static void mgos_pppos_try_baud_rate(struct mgos_pppos_data *pd) {
   struct mgos_uart_config ucfg;
@@ -128,7 +135,7 @@ static void mgos_pppos_try_baud_rate(struct mgos_pppos_data *pd) {
 }
 
 static void mgos_pppos_at_cmd(int uart_no, const char *cmd) {
-  LOG(LL_DEBUG, (">> %s", cmd));
+  LOG(LL_VERBOSE_DEBUG, (">> %s", cmd));
   mgos_uart_write(uart_no, cmd, strlen(cmd));
   if (strcmp(cmd, "+++") != 0) {
     mgos_uart_write(uart_no, "\r\n", 2);
@@ -137,9 +144,9 @@ static void mgos_pppos_at_cmd(int uart_no, const char *cmd) {
 
 static void mgos_pppos_set_state(struct mgos_pppos_data *pd,
                                  enum mgos_pppos_state state) {
-  LOG(LL_DEBUG, ("%d -> %d", pd->state, state));
+  LOG(LL_DEBUG,
+      ("%d -> %d %lf %lf", pd->state, state, mgos_uptime(), pd->deadline));
   pd->state = state;
-  pd->deadline = 0;
 }
 
 static void mgos_pppos_net_status_cb(void *arg) {
@@ -149,7 +156,6 @@ static void mgos_pppos_net_status_cb(void *arg) {
 
 static void mgos_pppos_set_net_status(struct mgos_pppos_data *pd,
                                       enum mgos_net_event status) {
-  LOG(LL_DEBUG, ("%d -> %d", pd->net_status, status));
   pd->net_status = status;
   if (pd->net_status != pd->net_status_last_reported) {
     pd->net_status_last_reported = pd->net_status;
@@ -193,7 +199,7 @@ static void mgos_pppos_status_cb(ppp_pcb *pcb, int err_code, void *arg) {
       pd->pppcb = NULL;
       /* ppp_close delivers PPPERR_USER, so proto will be freed. */
       ppp_close(pcb, 0 /* nocarrier */);
-      mgos_pppos_set_state(pd, PPPOS_START);
+      mgos_pppos_set_state(pd, PPPOS_INIT);
       mgos_uart_schedule_dispatcher(pd->cfg->uart_no, false /* from_isr */);
       break;
     }
@@ -268,6 +274,8 @@ static bool mgos_pppos_ifr_cb(struct mgos_pppos_data *pd, bool ok,
         (pd->cfg->fc_enable ? MGOS_UART_FC_HW : MGOS_UART_FC_NONE);
     ok = mgos_uart_configure(uart_no, &ucfg);
     if (ok) mgos_uart_set_rx_enabled(uart_no, true);
+    // Some modems (SIM5320E) need a bit of time to switch baud rate.
+    mgos_msleep(10);
   }
   (void) data;
   return ok;
@@ -371,10 +379,23 @@ static bool mgos_pppos_creg_cb(struct mgos_pppos_data *pd, bool ok,
   } else {
     LOG(LL_ERROR, ("Not connected to mobile network, status %d (%s)", st, sts));
     pd->cmd_idx--;
+    pd->delay = mgos_uptime() + 1.0;
     ok = true;
   }
-  (void) pd;
   return ok;
+}
+
+static bool mgos_pppos_cops_cb(struct mgos_pppos_data *pd, bool ok,
+                               struct mg_str data) {
+  if (!ok) return true;
+  const char *q1 = mg_strchr(data, '"');
+  if (q1 == NULL) return true;
+  const char *q2 =
+      mg_strchr(mg_mk_str_n(q1 + 1, data.len - (q1 - data.p) - 1), '"');
+  if (q2 == NULL) return true;
+  LOG(LL_INFO, ("Operator: %.*s", (int) (q2 - q1 - 1), q1 + 1));
+  (void) pd;
+  return true;
 }
 
 static bool mgos_pppos_csq_cb(struct mgos_pppos_data *pd, bool ok,
@@ -382,7 +403,8 @@ static bool mgos_pppos_csq_cb(struct mgos_pppos_data *pd, bool ok,
   if (!ok) return true;
   int sq, ber;
   if (sscanf(data.p, "+CSQ: %d,%d", &sq, &ber) != 2) return true;
-  LOG(LL_INFO, ("Signal quality: %d", sq));
+  if (sq < 0 || sq > 32) return true;
+  LOG(LL_INFO, ("RSSI: %d", (-113 + sq * 2)));
   (void) pd;
   return true;
 }
@@ -412,89 +434,144 @@ static void pppos_set_auth(ppp_pcb *pcb, u8_t authtype, const char *user,
   tcpip_api_call(pppapi_do_ppp_set_auth, &msg.call);
 }
 
+static void mgos_pppos_poll_timer_cb(void *arg);
+
 static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
   int uart_no = pd->cfg->uart_no;
   switch (pd->state) {
     case PPPOS_IDLE: {
       if (pd->data.len > 0) mbuf_clear(&pd->data);
+      if (pd->poll_timer_id != MGOS_INVALID_TIMER_ID) {
+        mgos_clear_timer(pd->poll_timer_id);
+        pd->poll_timer_id = MGOS_INVALID_TIMER_ID;
+      }
       mgos_pppos_set_net_status(pd, MGOS_NET_EV_DISCONNECTED);
       break;
     }
-    case PPPOS_START: {
-      const char *apn = pd->cfg->apn;
-      if (apn == NULL) {
+    case PPPOS_INIT: {
+      if (pd->cfg->apn == NULL) {
         LOG(LL_ERROR, ("APN is not set"));
         mgos_pppos_set_state(pd, PPPOS_IDLE);
         break;
       }
       mgos_pppos_set_net_status(pd, MGOS_NET_EV_DISCONNECTED);
-      LOG(LL_INFO, ("Connecting (UART%d, APN '%s')...", pd->cfg->uart_no,
-                    (apn ? apn : "")));
       mbuf_free(&pd->data);
       mbuf_init(&pd->data, 0);
       mg_strfree(&pd->ati_resp);
       mg_strfree(&pd->cimi_resp);
-      if (!pd->baud_ok) mgos_pppos_try_baud_rate(pd);
+
+      pd->attempt++;
+      pd->delay = 0;
       pd->deadline = 0;
       pd->pppcb = NULL;
       memset(&pd->pppif, 0, sizeof(pd->pppif));
       pd->net_status = MGOS_NET_EV_DISCONNECTED;
       pd->net_status_last_reported = MGOS_NET_EV_DISCONNECTED;
       free_cmds(pd);
-      add_cmd(pd, mgos_pppos_at_cb, "AT");
-      add_cmd(pd, NULL, "ATH");
-      add_cmd(pd, NULL, "ATZ");
-      add_cmd(pd, NULL, "ATE0");
-      add_cmd(pd, mgos_pppos_ati_cb, "ATI");
-      add_cmd(pd, mgos_pppos_gsn_cb, "AT+GSN");
-      add_cmd(pd, NULL, "AT+IPR?");
-      add_cmd(pd, NULL, "AT+IFC?");
-      add_cmd(pd, mgos_pppos_ifr_cb, "AT+IPR=%d", pd->cfg->baud_rate);
-      int ifc = (pd->cfg->fc_enable ? 2 : 0);
-      add_cmd(pd, mgos_pppos_ifc_cb, "AT+IFC=%d,%d", ifc, ifc);
-      add_cmd(pd, mgos_pppos_cimi_cb, "AT+CIMI");
-      add_cmd(pd, mgos_pppos_cpin_cb, "AT+CPIN?");
-      add_cmd(pd, NULL, "AT+CFUN=1"); /* Full functionality */
-      add_cmd(pd, mgos_pppos_creg_cb, "AT+CREG?");
-      add_cmd(pd, mgos_pppos_csq_cb, "AT+CSQ?");
-      add_cmd(pd, NULL, "AT+CREG=0"); /* Disable unsolicited reports */
-      if (pd->cfg->apn != NULL) {
-        add_cmd(pd, NULL, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg->apn);
+      if (!pd->baud_ok) mgos_pppos_try_baud_rate(pd);
+      if (pd->poll_timer_id == MGOS_INVALID_TIMER_ID) {
+        pd->poll_timer_id = mgos_set_timer(100, MGOS_TIMER_REPEAT,
+                                           mgos_pppos_poll_timer_cb, pd);
       }
-      add_cmd(pd, NULL, "ATDT*99***1#");
-      mgos_pppos_set_state(pd, PPPOS_ENTER_WAIT);
+      if (pd->cfg->rst_gpio >= 0 &&
+          (pd->attempt == 1 || pd->cfg->rst_mode == 1)) {
+        pd->baud_ok = false;
+        pd->try_baud_idx = 0;
+        pd->try_baud_fc = 0;
+        mgos_pppos_set_state(pd, PPPOS_RESET);
+      } else {
+        mgos_pppos_set_state(pd, PPPOS_BEGIN_WAIT);
+      }
       break;
     }
-    case PPPOS_ENTER_WAIT: {
-      const double now = mg_time();
+    case PPPOS_RESET: {
+      const double now = mgos_uptime();
+      mgos_gpio_setup_output(pd->cfg->rst_gpio, pd->cfg->rst_act);
+      pd->deadline = now + (pd->cfg->rst_hold_ms / 1000.0);
+      LOG(LL_INFO, ("Resetting modem..."));
+      mgos_pppos_set_state(pd, PPPOS_RESET_HOLD);
+      break;
+    }
+    case PPPOS_RESET_HOLD: {
+      const double now = mgos_uptime();
+      if (now < pd->deadline) break;
+      mgos_gpio_write(pd->cfg->rst_gpio, !pd->cfg->rst_act);
+      pd->deadline = now + (pd->cfg->rst_wait_ms / 1000.0);
+      mgos_pppos_set_state(pd, PPPOS_RESET_WAIT);
+      break;
+    }
+    case PPPOS_RESET_WAIT: {
+      const double now = mgos_uptime();
+      if (now < pd->deadline) break;
+      /* Note: not setting deadline to 0 so BEGIN goes straight to sending
+       * commands. */
+      mgos_pppos_set_state(pd, PPPOS_BEGIN);
+      break;
+    }
+    case PPPOS_BEGIN_WAIT: {
+      const double now = mgos_uptime();
       if (pd->deadline == 0) {
         /* Initial 1s pause before sending +++ */
         pd->deadline = now + 1.2;
       } else if (now > pd->deadline) {
-        mgos_pppos_set_state(pd, PPPOS_ENTER);
+        mgos_pppos_set_state(pd, PPPOS_BEGIN);
+        pd->deadline = 0;
       }
       break;
     }
-    case PPPOS_ENTER: {
-      const double now = mg_time();
+    case PPPOS_BEGIN: {
+      const double now = mgos_uptime();
       if (pd->deadline == 0) {
         mgos_pppos_at_cmd(uart_no, "+++");
         /* At least 1s after +++ */
         pd->deadline = now + 1.2;
       } else if (now > pd->deadline) {
-        mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTING);
+        pd->deadline = 0;
         if (pd->user_cmd) {
           mgos_pppos_set_state(pd, PPPOS_USER_CMD);
         } else {
           mgos_pppos_set_state(pd, PPPOS_SETUP);
-          mbuf_remove(&pd->data, pd->data.len);
         }
       }
       break;
     }
+
+    case PPPOS_SETUP: {
+      const char *apn = pd->cfg->apn;
+      mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTING);
+      LOG(LL_INFO, ("Connecting (UART%d, APN '%s')...", pd->cfg->uart_no,
+                    (apn ? apn : "")));
+      mbuf_remove(&pd->data, pd->data.len);
+      add_cmd(pd, mgos_pppos_at_cb, "AT");
+      add_cmd(pd, NULL, "ATH");
+      add_cmd(pd, NULL, "ATZ");
+      add_cmd(pd, NULL, "ATE0");
+      add_cmd(pd, mgos_pppos_ati_cb, "ATI");
+      if (!pd->baud_ok) {
+        add_cmd(pd, NULL, "AT+IPR?");
+        add_cmd(pd, NULL, "AT+IFC?");
+        add_cmd(pd, mgos_pppos_ifr_cb, "AT+IPR=%d", pd->cfg->baud_rate);
+        int ifc = (pd->cfg->fc_enable ? 2 : 0);
+        add_cmd(pd, mgos_pppos_ifc_cb, "AT+IFC=%d,%d", ifc, ifc);
+      }
+      add_cmd(pd, mgos_pppos_gsn_cb, "AT+GSN");
+      add_cmd(pd, mgos_pppos_cimi_cb, "AT+CIMI");
+      add_cmd(pd, mgos_pppos_cpin_cb, "AT+CPIN?");
+      add_cmd(pd, NULL, "AT+CFUN=1"); /* Full functionality */
+      add_cmd(pd, mgos_pppos_creg_cb, "AT+CREG?");
+      add_cmd(pd, mgos_pppos_at_cb, "AT+COPS=3,0");
+      add_cmd(pd, mgos_pppos_cops_cb, "AT+COPS?");
+      add_cmd(pd, mgos_pppos_csq_cb, "AT+CSQ");
+      add_cmd(pd, NULL, "AT+CREG=0"); /* Disable unsolicited reports */
+      add_cmd(pd, NULL, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg->apn);
+      add_cmd(pd, NULL, "ATDT*99***1#");
+      mgos_pppos_set_state(pd, PPPOS_CMD);
+      break;
+    }
+
     case PPPOS_USER_CMD: {
       const char *eol;
-      const double now = mg_time();
+      const double now = mgos_uptime();
       struct mg_str s = mg_mk_str_n(pd->data.buf + pd->interrupted_data_len,
                                     pd->data.len - pd->interrupted_data_len);
       if (pd->deadline == 0) {
@@ -524,64 +601,72 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       break;
     }
     case PPPOS_USER_CMD_DONE: {
-      const double now = mg_time();
+      const double now = mgos_uptime();
       mgos_pppos_set_state(pd, pd->interrupted_state);
       struct mg_str s = mg_mk_str_n(pd->data.buf + pd->interrupted_data_len,
                                     pd->data.len - pd->interrupted_data_len);
       if (mg_strchr(s, '\r') == NULL && now < pd->deadline) break;
       mgos_pppos_set_state(pd, pd->interrupted_state);
       pd->data.len = pd->interrupted_data_len;
+      pd->deadline = 0;
       break;
     }
-    case PPPOS_SETUP: {
-      bool cmd_done = false, cmd_res = false;
-      const double now = mg_time();
+    case PPPOS_CMD: {
+      const double now = mgos_uptime();
       struct mgos_pppos_cmd *cur_cmd = &pd->cmds[pd->cmd_idx];
-      if (pd->deadline == 0) {
-        mgos_pppos_at_cmd(uart_no, cur_cmd->cmd);
-        pd->deadline = now + AT_CMD_TIMEOUT;
-        mbuf_clear(&pd->data);
-      } else if (now > pd->deadline) {
+      if (now < pd->delay) break;
+      mgos_pppos_at_cmd(uart_no, cur_cmd->cmd);
+      pd->deadline = now + AT_CMD_TIMEOUT;
+      mbuf_clear(&pd->data);
+      mgos_pppos_set_state(pd, PPPOS_CMD_RESP);
+      break;
+    }
+    case PPPOS_CMD_RESP: {
+      const double now = mgos_uptime();
+      struct mgos_pppos_cmd *cur_cmd = &pd->cmds[pd->cmd_idx];
+      if (now > pd->deadline) {
         LOG(LL_INFO, ("Command timed out: %s", cur_cmd->cmd));
         if (cur_cmd->cb != NULL) cur_cmd->cb(pd, false, mg_mk_str(NULL));
-        mgos_pppos_set_state(pd, PPPOS_START);
-      } else {
-        /* Consume data line by line */
-        struct mg_str s = mg_mk_str_n(pd->data.buf, pd->data.len);
-        struct mg_str sd = mg_mk_str_n(pd->data.buf, 0);
-        const char *eol;
-        while ((eol = mg_strchr(s, '\r')) != NULL) {
-          struct mg_str l = mg_mk_str_n(s.p, eol - s.p);
-          s.len -= (l.len + 1);
-          s.p += (l.len + 1);
-          l = mg_strstrip(l);
-          if (l.len == 0) continue;
-          LOG(LL_DEBUG, ("<< %.*s", (int) l.len, l.p));
-          if (mg_vcmp(&l, "OK") == 0 ||
-              mg_strstr(l, mg_mk_str("CONNECT")) == l.p) {
-            cmd_done = true;
-            if (cur_cmd->cb != NULL) {
-              cmd_res = cur_cmd->cb(pd, true, mg_strstrip(sd));
-              break;
-            } else {
-              cmd_res = true;
-            }
-          } else if (mg_vcmp(&l, "ERROR") == 0 ||
-                     mg_vcmp(&l, "NO CARRIER") == 0) {
-            cmd_done = true;
-            if (cur_cmd->cb != NULL) {
-              cmd_res = cur_cmd->cb(pd, false, mg_strstrip(sd));
-            } else {
-              LOG(LL_ERROR, ("Command failed: %s", cur_cmd->cmd));
-              cmd_res = false;
-            }
+        mgos_pppos_set_state(pd, PPPOS_INIT);
+        pd->deadline = 0;
+        break;
+      }
+      bool cmd_done = false, cmd_res = false;
+      /* Consume data line by line */
+      struct mg_str s = mg_mk_str_n(pd->data.buf, pd->data.len);
+      struct mg_str sd = mg_mk_str_n(pd->data.buf, 0);
+      const char *eol;
+      while ((eol = mg_strchr(s, '\r')) != NULL) {
+        struct mg_str l = mg_mk_str_n(s.p, eol - s.p);
+        s.len -= (l.len + 1);
+        s.p += (l.len + 1);
+        l = mg_strstrip(l);
+        if (l.len == 0) continue;
+        if (mg_vcmp(&l, "OK") == 0 ||
+            mg_strstr(l, mg_mk_str("CONNECT")) == l.p) {
+          cmd_done = true;
+          if (cur_cmd->cb != NULL) {
+            cmd_res = cur_cmd->cb(pd, true, mg_strstrip(sd));
             break;
           } else {
-            sd.len = eol - pd->data.buf;
+            cmd_res = true;
           }
+        } else if (mg_vcmp(&l, "ERROR") == 0 ||
+                   mg_vcmp(&l, "NO CARRIER") == 0) {
+          cmd_done = true;
+          if (cur_cmd->cb != NULL) {
+            cmd_res = cur_cmd->cb(pd, false, mg_strstrip(sd));
+          } else {
+            LOG(LL_ERROR, ("Command failed: %s", cur_cmd->cmd));
+            cmd_res = false;
+          }
+          break;
+        } else {
+          sd.len = eol - pd->data.buf;
         }
       }
       if (cmd_done) {
+        pd->deadline = 0;
         if (cmd_res) {
           pd->cmd_idx++;
           if (pd->cmd_idx >= pd->num_cmds) {
@@ -590,11 +675,11 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
             mgos_pppos_set_state(pd, PPPOS_START_PPP);
             mbuf_clear(&pd->data);
           } else {
-            pd->deadline = 0;
+            mgos_pppos_set_state(pd, PPPOS_CMD);
           }
         } else {
           /* Retry everything */
-          mgos_pppos_set_state(pd, PPPOS_START);
+          mgos_pppos_set_state(pd, PPPOS_INIT);
         }
       }
       break;
@@ -605,10 +690,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       mbuf_remove(&pd->data, pd->data.len);
       pd->pppcb = pppapi_pppos_create(&pd->pppif, mgos_pppos_send_cb,
                                       mgos_pppos_status_cb, pd);
-      LOG(LL_DEBUG, ("%p", pd->pppcb));
       if (pd->pppcb == NULL) {
         LOG(LL_ERROR, ("pppapi_pppos_create failed"));
-        mgos_pppos_set_state(pd, PPPOS_START);
+        mgos_pppos_set_state(pd, PPPOS_INIT);
         break;
       }
       if (user != NULL) {
@@ -620,19 +704,21 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       if (err != ERR_OK) {
         LOG(LL_ERROR, ("pppapi_connect failed: %d", err));
         pppapi_free(pd->pppcb);
-        mgos_pppos_set_state(pd, PPPOS_START);
+        mgos_pppos_set_state(pd, PPPOS_INIT);
       }
       mgos_pppos_set_state(pd, PPPOS_RUN);
       break;
     }
     case PPPOS_RUN: {
+      // We don't need polling anymore.
+      if (pd->poll_timer_id != MGOS_INVALID_TIMER_ID) {
+        mgos_clear_timer(pd->poll_timer_id);
+        pd->poll_timer_id = MGOS_INVALID_TIMER_ID;
+      }
       if (pd->data.len > 0) {
         pppos_input_tcpip(pd->pppcb, (u8_t *) pd->data.buf, pd->data.len);
         mbuf_remove(&pd->data, pd->data.len);
       }
-      break;
-    }
-    case PPPOS_CLOSE: {
       break;
     }
   }
@@ -641,7 +727,13 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
 static void mgos_pppos_dispatch(struct mgos_pppos_data *pd) {
   do {
     mgos_pppos_dispatch_once(pd);
-  } while (pd->state == PPPOS_START && pd->deadline == 0);
+  } while (pd->state == PPPOS_INIT && pd->deadline == 0);
+}
+
+static void mgos_pppos_poll_timer_cb(void *arg) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) arg;
+  ;
+  mgos_pppos_dispatch(pd);
 }
 
 static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
@@ -653,6 +745,9 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
       LOG(LL_DEBUG, ("< %d", (int) nr));
       if (pd->cfg->hexdump_enable) {
         mg_hexdumpf(stderr, pd->data.buf, pd->data.len);
+      } else if (pd->state != PPPOS_RUN) {
+        LOG(LL_VERBOSE_DEBUG,
+            ("<< %.*s", (int) nr, pd->data.buf + (pd->data.len - nr)));
       }
     }
   }
@@ -684,10 +779,10 @@ bool mgos_pppos_send_cmd(int iface, const char *req) {
       mg_asprintf(&pd->user_cmd, 0, "%s", req);
       if (pd->state == PPPOS_RUN) {
         pd->interrupted_state = PPPOS_RUN;
-        pd->state = PPPOS_ENTER_WAIT;
+        pd->state = PPPOS_BEGIN_WAIT;
       } else {
-        pd->interrupted_state = PPPOS_START;
-        pd->state = PPPOS_START;
+        pd->interrupted_state = PPPOS_INIT;
+        pd->state = PPPOS_INIT;
       }
       mgos_uart_schedule_dispatcher(pd->cfg->uart_no, false);
       return true;
@@ -696,23 +791,12 @@ bool mgos_pppos_send_cmd(int iface, const char *req) {
   return false;
 }
 
-static void mgos_pppos_poll_timer_cb(void *arg) {
-  struct mgos_pppos_data *pd;
-  SLIST_FOREACH(pd, &s_pds, next) {
-    mgos_pppos_dispatch(pd);
-  }
-}
-
 bool mgos_pppos_connect(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance != if_instance) continue;
     if (pd->state != PPPOS_IDLE) return false;
-    mgos_pppos_set_state(pd, PPPOS_START);
-    if (s_poll_timer_id == MGOS_INVALID_TIMER_ID) {
-      s_poll_timer_id = mgos_set_timer(2000, MGOS_TIMER_REPEAT,
-                                       mgos_pppos_poll_timer_cb, NULL);
-    }
+    mgos_pppos_set_state(pd, PPPOS_INIT);
     mgos_pppos_dispatch(pd);
     return true;
   }
