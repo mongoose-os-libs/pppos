@@ -40,7 +40,7 @@
 #include "mgos_uart.h"
 #include "mgos_utils.h"
 
-#define AT_CMD_TIMEOUT 3.0
+#define AT_CMD_TIMEOUT 2.0
 
 enum mgos_pppos_state {
   PPPOS_IDLE = 0,
@@ -123,8 +123,8 @@ static void mgos_pppos_try_baud_rate(struct mgos_pppos_data *pd) {
       ucfg.rx_fc_type = ucfg.tx_fc_type = MGOS_UART_FC_HW;
     }
   }
-  LOG(LL_INFO, ("Trying baud rate %d (fc %s)...", ucfg.baud_rate,
-                (ucfg.rx_fc_type != MGOS_UART_FC_NONE ? "on" : "off")));
+  LOG(LL_DEBUG, ("Trying baud rate %d (fc %s)...", ucfg.baud_rate,
+                 (ucfg.rx_fc_type != MGOS_UART_FC_NONE ? "on" : "off")));
   mgos_uart_configure(pd->cfg->uart_no, &ucfg);
   mgos_uart_set_rx_enabled(pd->cfg->uart_no, true);
   pd->try_baud_idx++;
@@ -449,6 +449,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         mgos_clear_timer(pd->poll_timer_id);
         pd->poll_timer_id = MGOS_INVALID_TIMER_ID;
       }
+      if (pd->cfg->dtr_gpio >= 0) {
+        mgos_gpio_write(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
+      }
       mgos_pppos_set_net_status(pd, MGOS_NET_EV_DISCONNECTED);
       break;
     }
@@ -477,6 +480,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         pd->poll_timer_id = mgos_set_timer(100, MGOS_TIMER_REPEAT,
                                            mgos_pppos_poll_timer_cb, pd);
       }
+      if (pd->cfg->dtr_gpio >= 0) {
+        mgos_gpio_write(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
+      }
       if (pd->cfg->rst_gpio >= 0 &&
           (pd->attempt == 1 || pd->cfg->rst_mode == 1)) {
         pd->baud_ok = false;
@@ -499,6 +505,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
     case PPPOS_RESET_HOLD: {
       const double now = mgos_uptime();
       if (now < pd->deadline) break;
+      if (pd->cfg->dtr_gpio >= 0) {
+        mgos_gpio_write(pd->cfg->dtr_gpio, pd->cfg->dtr_act);
+      }
       mgos_gpio_write(pd->cfg->rst_gpio, !pd->cfg->rst_act);
       pd->deadline = now + (pd->cfg->rst_wait_ms / 1000.0);
       mgos_pppos_set_state(pd, PPPOS_RESET_WAIT);
@@ -517,7 +526,10 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       if (pd->deadline == 0) {
         /* Initial 1s pause before sending +++ */
         pd->deadline = now + 1.2;
-      } else if (now > pd->deadline) {
+      } else if (now >= pd->deadline) {
+        if (pd->cfg->dtr_gpio >= 0) {
+          mgos_gpio_write(pd->cfg->dtr_gpio, pd->cfg->dtr_act);
+        }
         mgos_pppos_set_state(pd, PPPOS_BEGIN);
         pd->deadline = 0;
       }
@@ -542,13 +554,15 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
 
     case PPPOS_SETUP: {
       const char *apn = pd->cfg->apn;
+      if (pd->cfg->dtr_gpio >= 0) {
+        mgos_gpio_write(pd->cfg->dtr_gpio, pd->cfg->dtr_act);
+      }
       mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTING);
       LOG(LL_INFO, ("Connecting (UART%d, APN '%s')...", pd->cfg->uart_no,
                     (apn ? apn : "")));
       mbuf_remove(&pd->data, pd->data.len);
       add_cmd(pd, mgos_pppos_at_cb, "AT");
       add_cmd(pd, NULL, "ATH");
-      add_cmd(pd, NULL, "ATZ");
       add_cmd(pd, NULL, "ATE0");
       add_cmd(pd, mgos_pppos_ati_cb, "ATI");
       if (!pd->baud_ok) {
@@ -870,7 +884,7 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
                 cfg->uart_no, mgos_gpio_str(ucfg.dev.rx_gpio, b1),
                 mgos_gpio_str(ucfg.dev.tx_gpio, b2),
                 mgos_gpio_str(ucfg.dev.cts_gpio, b3),
-                mgos_gpio_str(ucfg.dev.rts_gpio, b4), ucfg.baud_rate,
+                mgos_gpio_str(ucfg.dev.rts_gpio, b4), cfg->baud_rate,
                 cfg->fc_enable ? "on" : "off", (cfg->apn ? cfg->apn : "")));
 #else
 #if CS_PLATFORM == CS_P_STM32
@@ -891,7 +905,7 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
                 cfg->uart_no, mgos_gpio_str(ucfg.dev.pins.rx, b1),
                 mgos_gpio_str(ucfg.dev.pins.tx, b2),
                 mgos_gpio_str(ucfg.dev.pins.cts, b3),
-                mgos_gpio_str(ucfg.dev.pins.rts, b4), ucfg.baud_rate,
+                mgos_gpio_str(ucfg.dev.pins.rts, b4), cfg->baud_rate,
                 cfg->fc_enable ? "on" : "off", (cfg->apn ? cfg->apn : "")));
   (void) b1;
   (void) b2;
@@ -906,7 +920,7 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
     return false;
   }
   LOG(LL_INFO,
-      ("PPPoS UART%d %d, fc %s, APN '%s'", cfg->uart_no, ucfg.baud_rate,
+      ("PPPoS UART%d %d, fc %s, APN '%s'", cfg->uart_no, cfg->baud_rate,
        cfg->fc_enable ? "on" : "off", (cfg->apn ? cfg->apn : "")));
 #endif
 #endif
@@ -919,6 +933,9 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
   pd->cfg = cfg;
   pd->if_instance = if_instance;
   pd->state = PPPOS_IDLE;
+  if (pd->cfg->dtr_gpio >= 0) {
+    mgos_gpio_setup_output(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
+  }
   SLIST_INSERT_HEAD(&s_pds, pd, next);
   mgos_uart_set_dispatcher(cfg->uart_no, mgos_pppos_uart_dispatcher, pd);
   mgos_uart_set_rx_enabled(cfg->uart_no, true);

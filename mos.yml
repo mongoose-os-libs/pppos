@@ -15,6 +15,8 @@ config_schema:
   - ["pppos.tx_gpio", "i", -1, {title: "TX pin; -1 = use default"}]
   - ["pppos.cts_gpio", "i", -1, {title: "CTS pin; -1 = use default"}]
   - ["pppos.rts_gpio", "i", -1, {title: "RTS pin; -1 = use default"}]
+  - ["pppos.dtr_gpio", "i", -1, {title: "DTR pin; -1 - do not use, if set will be driven to active state"}]
+  - ["pppos.dtr_act", "i", 0, {title: "Active state for the DTR pin"}]
   # These depend on the operator and are usually well known.
   - ["pppos.apn", "s", "", {title: "APN name"}]
   - ["pppos.user", "s", "", {title: "User name"}]
