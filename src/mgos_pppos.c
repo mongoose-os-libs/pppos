@@ -175,7 +175,9 @@ static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
   LOG(LL_DEBUG, ("> %d (av %d)", (int) len, (int) wr_av));
   len = MIN(len, wr_av);
   len = mgos_uart_write(pd->cfg->uart_no, data, len);
+#if MG_ENABLE_HEXDUMP
   if (pd->cfg->hexdump_enable) mg_hexdumpf(stderr, data, len);
+#endif
   (void) pcb;
   return len;
 }
@@ -257,6 +259,7 @@ static bool mgos_pppos_gsn_cb(struct mgos_pppos_data *pd, bool ok,
                 (int) data.len, data.p));
   mgos_event_trigger(MGOS_PPPOS_GOT_IMEI, &pd->ati_resp);
   mg_strfree(&pd->ati_resp);
+  (void) data;
   return true;
 }
 
@@ -382,6 +385,7 @@ static bool mgos_pppos_creg_cb(struct mgos_pppos_data *pd, bool ok,
     pd->delay = mgos_uptime() + 1.0;
     ok = true;
   }
+  (void) sts;
   return ok;
 }
 
@@ -566,6 +570,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       add_cmd(pd, NULL, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg->apn);
       add_cmd(pd, NULL, "ATDT*99***1#");
       mgos_pppos_set_state(pd, PPPOS_CMD);
+      (void) apn;
       break;
     }
 
@@ -744,7 +749,9 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
     if (nr > 0) {
       LOG(LL_DEBUG, ("< %d", (int) nr));
       if (pd->cfg->hexdump_enable) {
+#if MG_ENABLE_HEXDUMP
         mg_hexdumpf(stderr, pd->data.buf, pd->data.len);
+#endif
       } else if (pd->state != PPPOS_RUN) {
         LOG(LL_VERBOSE_DEBUG,
             ("<< %.*s", (int) nr, pd->data.buf + (pd->data.len - nr)));
@@ -886,6 +893,10 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
                 mgos_gpio_str(ucfg.dev.pins.cts, b3),
                 mgos_gpio_str(ucfg.dev.pins.rts, b4), ucfg.baud_rate,
                 cfg->fc_enable ? "on" : "off", (cfg->apn ? cfg->apn : "")));
+  (void) b1;
+  (void) b2;
+  (void) b3;
+  (void) b4;
 #else
   if (mgos_sys_config_get_pppos_rx_gpio() >= 0 ||
       mgos_sys_config_get_pppos_tx_gpio() >= 0 ||
