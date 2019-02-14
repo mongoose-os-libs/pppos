@@ -85,7 +85,7 @@ struct mgos_pppos_data {
   ppp_pcb *pppcb;
   enum mgos_net_event net_status;
   enum mgos_net_event net_status_last_reported;
-  struct mg_str ati_resp, cimi_resp;
+  struct mg_str ati_resp, imei, imsi, iccid;
 
   SLIST_ENTRY(mgos_pppos_data) next;
 };
@@ -252,14 +252,10 @@ static bool mgos_pppos_ati_cb(struct mgos_pppos_data *pd, bool ok,
 
 static bool mgos_pppos_gsn_cb(struct mgos_pppos_data *pd, bool ok,
                               struct mg_str data) {
-  if (!ok) {
-    data = mg_mk_str("unknown");
-  }
+  if (!ok) data = mg_mk_str("");
+  pd->imei = mg_strdup(data);
   LOG(LL_INFO, ("%.*s, IMEI: %.*s", (int) pd->ati_resp.len, pd->ati_resp.p,
-                (int) data.len, data.p));
-  mgos_event_trigger(MGOS_PPPOS_GOT_IMEI, &pd->ati_resp);
-  mg_strfree(&pd->ati_resp);
-  (void) data;
+                (int) pd->imei.len, pd->imei.p));
   return true;
 }
 
@@ -306,8 +302,18 @@ static bool mgos_pppos_ifc_cb(struct mgos_pppos_data *pd, bool ok,
 
 static bool mgos_pppos_cimi_cb(struct mgos_pppos_data *pd, bool ok,
                                struct mg_str data) {
+  if (ok) pd->imsi = mg_strdup(mg_strstrip(data));
+  return true;
+}
+
+static bool mgos_pppos_ccid_cb(struct mgos_pppos_data *pd, bool ok,
+                               struct mg_str data) {
   if (ok) {
-    pd->cimi_resp = mg_strdup(data);
+    if (mg_str_starts_with(data, mg_mk_str("+CCID: "))) {
+      data.p += 7;
+      data.len -= 7;
+    }
+    pd->iccid = mg_strdup(mg_strstrip(data));
   }
   return true;
 }
@@ -325,17 +331,21 @@ static bool mgos_pppos_cpin_cb(struct mgos_pppos_data *pd, bool ok,
   /* +CPIN: status */
   struct mg_str st = mg_mk_str_n(data.p + 7, data.len - 7);
   if (mg_vcmp(&st, "READY") == 0) {
-    struct mg_str imsi = pd->cimi_resp;
-    if (imsi.len == 0) imsi = mg_mk_str("unknown");
-    LOG(LL_INFO, ("SIM is ready, IMSI: %.*s", (int) imsi.len, imsi.p));
-    mgos_event_trigger(MGOS_PPPOS_GOT_IMSI, &imsi);
-    mg_strfree(&pd->cimi_resp);
+    struct mg_str imsi = pd->imsi, iccid = pd->iccid;
+    LOG(LL_INFO, ("SIM is ready, IMSI: %.*s, ICCID: %.*s", (int) imsi.len,
+                  imsi.p, (int) iccid.len, iccid.p));
   } else {
     LOG(LL_WARN,
         ("SIM is not ready (%.*s), proceeding anyway", (int) st.len, st.p));
     /* Proceed anyway, maybe we didn't get it right */
   }
-  (void) pd;
+  struct mgos_pppos_info_arg arg = {
+      .info = pd->ati_resp,
+      .imei = pd->imei,
+      .imsi = pd->imsi,
+      .iccid = pd->iccid,
+  };
+  mgos_event_trigger(MGOS_PPPOS_INFO, &arg);
   return true;
 }
 
@@ -465,7 +475,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       mbuf_free(&pd->data);
       mbuf_init(&pd->data, 0);
       mg_strfree(&pd->ati_resp);
-      mg_strfree(&pd->cimi_resp);
+      mg_strfree(&pd->imei);
+      mg_strfree(&pd->imsi);
+      mg_strfree(&pd->iccid);
 
       pd->attempt++;
       pd->delay = 0;
@@ -574,6 +586,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       }
       add_cmd(pd, mgos_pppos_gsn_cb, "AT+GSN");
       add_cmd(pd, mgos_pppos_cimi_cb, "AT+CIMI");
+      add_cmd(pd, mgos_pppos_ccid_cb, "AT+CCID");
       add_cmd(pd, mgos_pppos_cpin_cb, "AT+CPIN?");
       add_cmd(pd, NULL, "AT+CFUN=1"); /* Full functionality */
       add_cmd(pd, mgos_pppos_creg_cb, "AT+CREG?");
@@ -841,18 +854,26 @@ bool mgos_pppos_disconnect(int if_instance) {
   return false;
 }
 
-struct mg_str mgos_pppos_get_imsi(int if_instance) {
+struct mg_str mgos_pppos_get_imei(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
-    if (pd->if_instance == if_instance) return mg_strdup(pd->cimi_resp);
+    if (pd->if_instance == if_instance) return mg_strdup(pd->imei);
   }
   return mg_mk_str_n(NULL, 0);
 }
 
-struct mg_str mgos_pppos_get_imei(int if_instance) {
+struct mg_str mgos_pppos_get_imsi(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
-    if (pd->if_instance == if_instance) return mg_strdup(pd->ati_resp);
+    if (pd->if_instance == if_instance) return mg_strdup(pd->imsi);
+  }
+  return mg_mk_str_n(NULL, 0);
+}
+
+struct mg_str mgos_pppos_get_iccid(int if_instance) {
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    if (pd->if_instance == if_instance) return mg_strdup(pd->iccid);
   }
   return mg_mk_str_n(NULL, 0);
 }

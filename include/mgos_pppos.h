@@ -38,8 +38,7 @@ bool mgos_pppos_dev_get_ip_info(int if_instance,
 
 enum mgos_pppos_event {
   MGOS_PPPOS_CMD_RESP = MGOS_PPPOS_BASE,  // ev_data: struct mgos_pppos_cmd_resp
-  MGOS_PPPOS_GOT_IMSI,                    // ev_data: struct mg_str with IMSI
-  MGOS_PPPOS_GOT_IMEI,                    // ev_data: struct mg_str with IMEI
+  MGOS_PPPOS_INFO,                        // ev_data: struct mgos_ppos_info_arg
 };
 
 struct mgos_pppos_cmd_resp {
@@ -48,12 +47,21 @@ struct mgos_pppos_cmd_resp {
   struct mg_str response;
 };
 
+struct mgos_pppos_info_arg {
+  struct mg_str info; /* ATI command response */
+  struct mg_str imei;
+  struct mg_str imsi;
+  struct mg_str iccid;
+};
+
 bool mgos_pppos_send_cmd(int iface, const char *req);
 bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance);
 bool mgos_pppos_connect(int if_instance);
 bool mgos_pppos_disconnect(int if_instance);
+
 struct mg_str mgos_pppos_get_imei(int if_instance);
 struct mg_str mgos_pppos_get_imsi(int if_instance);
+struct mg_str mgos_pppos_get_iccid(int if_instance);
 
 #ifdef __cplusplus
 }
