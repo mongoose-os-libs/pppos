@@ -331,9 +331,8 @@ static bool mgos_pppos_cpin_cb(struct mgos_pppos_data *pd, bool ok,
   /* +CPIN: status */
   struct mg_str st = mg_mk_str_n(data.p + 7, data.len - 7);
   if (mg_vcmp(&st, "READY") == 0) {
-    struct mg_str imsi = pd->imsi, iccid = pd->iccid;
-    LOG(LL_INFO, ("SIM is ready, IMSI: %.*s, ICCID: %.*s", (int) imsi.len,
-                  imsi.p, (int) iccid.len, iccid.p));
+    LOG(LL_INFO, ("SIM is ready, IMSI: %.*s, ICCID: %.*s", (int) pd->imsi.len,
+                  pd->imsi.p, (int) pd->iccid.len, pd->iccid.p));
   } else {
     LOG(LL_WARN,
         ("SIM is not ready (%.*s), proceeding anyway", (int) st.len, st.p));
