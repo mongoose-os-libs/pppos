@@ -465,7 +465,6 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         mgos_pppos_set_state(pd, PPPOS_IDLE);
         break;
       }
-      mgos_pppos_set_net_status(pd, MGOS_NET_EV_DISCONNECTED);
       mbuf_free(&pd->data);
       mbuf_init(&pd->data, 0);
       mg_strfree(&pd->ati_resp);
