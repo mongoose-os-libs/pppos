@@ -172,7 +172,7 @@ static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
      * transmissions. */
     return 0;
   }
-  LOG(LL_DEBUG, ("> %d (av %d)", (int) len, (int) wr_av));
+  LOG(LL_VERBOSE_DEBUG, ("> %d (av %d)", (int) len, (int) wr_av));
   len = MIN(len, wr_av);
   len = mgos_uart_write(pd->cfg->uart_no, data, len);
 #if MG_ENABLE_HEXDUMP
@@ -252,50 +252,45 @@ static bool mgos_pppos_ati_cb(struct mgos_pppos_data *pd, bool ok,
 
 static bool mgos_pppos_gsn_cb(struct mgos_pppos_data *pd, bool ok,
                               struct mg_str data) {
-  if (!ok) data = mg_mk_str("");
-  pd->imei = mg_strdup(data);
-  LOG(LL_INFO, ("%.*s, IMEI: %.*s", (int) pd->ati_resp.len, pd->ati_resp.p,
-                (int) pd->imei.len, pd->imei.p));
+  if (ok) {
+    /* We were able to read the response, so baud rate must be fine. */
+    pd->baud_ok = true;
+    pd->imei = mg_strdup(data);
+    LOG(LL_INFO, ("%.*s, IMEI: %.*s", (int) pd->ati_resp.len, pd->ati_resp.p,
+                  (int) pd->imei.len, pd->imei.p));
+  }
   return true;
 }
 
-static bool mgos_pppos_ifr_cb(struct mgos_pppos_data *pd, bool ok,
-                              struct mg_str data) {
+bool mgos_pppos_ifr_cb(struct mgos_pppos_data *pd, bool ok,
+                       struct mg_str data) {
   int uart_no = pd->cfg->uart_no;
   struct mgos_uart_config ucfg;
   if (!ok) return false;
+  /* After receiving the response, set our own FC accordingly. */
   if (!mgos_uart_config_get(uart_no, &ucfg)) return false;
-  if (ucfg.baud_rate != pd->cfg->baud_rate) {
-    LOG(LL_DEBUG,
-        ("Switching UART%d to %d...", pd->cfg->uart_no, pd->cfg->baud_rate));
-    ucfg.baud_rate = pd->cfg->baud_rate;
-    ucfg.rx_fc_type = ucfg.tx_fc_type =
-        (pd->cfg->fc_enable ? MGOS_UART_FC_HW : MGOS_UART_FC_NONE);
-    ok = mgos_uart_configure(uart_no, &ucfg);
-    if (ok) mgos_uart_set_rx_enabled(uart_no, true);
-    // Some modems (SIM5320E) need a bit of time to switch baud rate.
-    mgos_msleep(10);
-  }
+  LOG(LL_DEBUG,
+      ("Switching UART%d to %d...", pd->cfg->uart_no, pd->cfg->baud_rate));
+  ucfg.baud_rate = pd->cfg->baud_rate;
+  ucfg.rx_fc_type = ucfg.tx_fc_type =
+      (pd->cfg->fc_enable ? MGOS_UART_FC_HW : MGOS_UART_FC_NONE);
+  ok = mgos_uart_configure(uart_no, &ucfg);
+  if (ok) mgos_uart_set_rx_enabled(uart_no, true);
   (void) data;
   return ok;
 }
 
-static bool mgos_pppos_ifc_cb(struct mgos_pppos_data *pd, bool ok,
-                              struct mg_str data) {
+bool mgos_pppos_ifc_cb(struct mgos_pppos_data *pd, bool ok,
+                       struct mg_str data) {
   int uart_no = pd->cfg->uart_no;
   struct mgos_uart_config ucfg;
   if (!ok) return false;
-  /* We were able to read the response, so baud rate must be fine. */
-  pd->baud_ok = true;
-  /* After receiving the response, set our own FC accordingly. */
   if (!mgos_uart_config_get(uart_no, &ucfg)) return false;
   enum mgos_uart_fc_type fc_type =
       (pd->cfg->fc_enable ? MGOS_UART_FC_HW : MGOS_UART_FC_NONE);
-  if (ucfg.rx_fc_type != fc_type || ucfg.tx_fc_type != fc_type) {
-    ucfg.rx_fc_type = ucfg.tx_fc_type = fc_type;
-    ok = mgos_uart_configure(uart_no, &ucfg);
-    if (ok) mgos_uart_set_rx_enabled(uart_no, true);
-  }
+  ucfg.rx_fc_type = ucfg.tx_fc_type = fc_type;
+  ok = mgos_uart_configure(uart_no, &ucfg);
+  if (ok) mgos_uart_set_rx_enabled(uart_no, true);
   (void) data;
   return ok;
 }
@@ -494,6 +489,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       if (pd->cfg->dtr_gpio >= 0) {
         mgos_gpio_write(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
       }
+      mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTING);
       if (pd->cfg->rst_gpio >= 0 &&
           (pd->attempt == 1 || pd->cfg->rst_mode == 1)) {
         pd->baud_ok = false;
@@ -568,7 +564,6 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       if (pd->cfg->dtr_gpio >= 0) {
         mgos_gpio_write(pd->cfg->dtr_gpio, pd->cfg->dtr_act);
       }
-      mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTING);
       LOG(LL_INFO, ("Connecting (UART%d, APN '%s')...", pd->cfg->uart_no,
                     (apn ? apn : "")));
       mbuf_remove(&pd->data, pd->data.len);
@@ -577,11 +572,20 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       add_cmd(pd, NULL, "ATE0");
       add_cmd(pd, mgos_pppos_ati_cb, "ATI");
       if (!pd->baud_ok) {
-        add_cmd(pd, NULL, "AT+IPR?");
-        add_cmd(pd, NULL, "AT+IFC?");
-        add_cmd(pd, mgos_pppos_ifr_cb, "AT+IPR=%d", pd->cfg->baud_rate);
-        int ifc = (pd->cfg->fc_enable ? 2 : 0);
-        add_cmd(pd, mgos_pppos_ifc_cb, "AT+IFC=%d,%d", ifc, ifc);
+        struct mgos_uart_config ucfg;
+        bool need_ifr = true, need_ifc = true;
+        if (mgos_uart_config_get(uart_no, &ucfg)) {
+          need_ifr = (pd->cfg->baud_rate != ucfg.baud_rate);
+          need_ifc =
+              (pd->cfg->fc_enable != (ucfg.baud_rate == MGOS_UART_FC_HW));
+        }
+        if (need_ifr) {
+          add_cmd(pd, mgos_pppos_ifr_cb, "AT+IPR=%d", pd->cfg->baud_rate);
+        }
+        if (need_ifc) {
+          int ifc = (pd->cfg->fc_enable ? 2 : 0);
+          add_cmd(pd, mgos_pppos_ifc_cb, "AT+IFC=%d,%d", ifc, ifc);
+        }
       }
       add_cmd(pd, mgos_pppos_gsn_cb, "AT+GSN");
       add_cmd(pd, mgos_pppos_cimi_cb, "AT+CIMI");
@@ -648,6 +652,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       if (now < pd->delay) break;
       mgos_pppos_at_cmd(uart_no, cur_cmd->cmd);
       pd->deadline = now + AT_CMD_TIMEOUT;
+      pd->delay = 0;
       mbuf_clear(&pd->data);
       mgos_pppos_set_state(pd, PPPOS_CMD_RESP);
       break;
@@ -706,6 +711,10 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
             mgos_pppos_set_state(pd, PPPOS_START_PPP);
             mbuf_clear(&pd->data);
           } else {
+            // Default delay of 50 ms.
+            // Some modems (u-blox SARA-G3xx) just time out
+            // if commands are sent too fast.
+            if (pd->delay == 0) pd->delay = mgos_uptime() + 0.05;
             mgos_pppos_set_state(pd, PPPOS_CMD);
           }
         } else {
@@ -773,7 +782,7 @@ static void mgos_pppos_uart_dispatcher(int uart_no, void *arg) {
   if (rx_av > 0) {
     size_t nr = mgos_uart_read_mbuf(uart_no, &pd->data, rx_av);
     if (nr > 0) {
-      LOG(LL_DEBUG, ("< %d", (int) nr));
+      LOG(LL_VERBOSE_DEBUG, ("< %d", (int) nr));
       if (pd->cfg->hexdump_enable) {
 #if MG_ENABLE_HEXDUMP
         mg_hexdumpf(stderr, pd->data.buf, pd->data.len);
