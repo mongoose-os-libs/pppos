@@ -19,7 +19,6 @@
 
 #include "common/cs_dbg.h"
 #include "common/mbuf.h"
-#include "common/mg_str.h"
 #include "common/queue.h"
 
 #include "lwip/ip_addr.h"
@@ -45,6 +44,7 @@
 enum mgos_pppos_state {
   PPPOS_IDLE = 0,
   PPPOS_INIT = 1,
+  PPPOS_START_SEQ = 12,
   PPPOS_RESET = 2,
   PPPOS_RESET_HOLD = 3,
   PPPOS_RESET_WAIT = 4,
@@ -55,8 +55,6 @@ enum mgos_pppos_state {
   PPPOS_CMD_RESP = 9,
   PPPOS_START_PPP = 10,
   PPPOS_RUN = 11,
-  PPPOS_USER_CMD = 12,
-  PPPOS_USER_CMD_DONE = 13,
 };
 
 struct mgos_pppos_cmd;
@@ -67,7 +65,7 @@ struct mgos_pppos_data {
   enum mgos_pppos_state state;
   struct mbuf data;
   double delay, deadline;
-  bool baud_ok;
+  bool baud_ok, cmd_mode;
   int attempt;
   mgos_timer_id poll_timer_id;
 
@@ -76,10 +74,7 @@ struct mgos_pppos_data {
   int cmd_idx;
   int try_baud_idx;
   int try_baud_fc;
-
-  char *user_cmd;
-  enum mgos_pppos_state interrupted_state;
-  int interrupted_data_len;
+  enum mgos_pppos_state cmd_success_state, cmd_error_state;
 
   struct netif pppif;
   ppp_pcb *pppcb;
@@ -90,22 +85,12 @@ struct mgos_pppos_data {
   SLIST_ENTRY(mgos_pppos_data) next;
 };
 
-typedef bool (*mgos_pppos_cmd_cb_t)(struct mgos_pppos_data *pd, bool ok,
-                                    struct mg_str data);
-
-struct mgos_pppos_cmd {
-  char *cmd;
-  mgos_pppos_cmd_cb_t cb;
-};
-
 static SLIST_HEAD(s_pds, mgos_pppos_data) s_pds = SLIST_HEAD_INITIALIZER(s_pds);
 
 /* If we fail to communicate with the modem at the specified rate,
  * we will try these (with no flow control), in this order. */
-static const int s_baud_rates[] = {
-    0 /* first we try the configured rate */, 9600, 115200, 230400, 460800,
-    921600,
-};
+static const int s_baud_rates[] = {0 /* first we try the configured rate */,
+                                   115200, 230400, 460800, 921600};
 
 static void mgos_pppos_try_baud_rate(struct mgos_pppos_data *pd) {
   struct mgos_uart_config ucfg;
@@ -166,6 +151,10 @@ static void mgos_pppos_set_net_status(struct mgos_pppos_data *pd,
 static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
                                 void *ctx) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) ctx;
+  if (pd->state != PPPOS_RUN) {
+    /* Doing something else - e.g. running user command. */
+    return 0;
+  }
   size_t wr_av = mgos_uart_write_avail(pd->cfg->uart_no);
   if (wr_av < len) {
     /* Can't send all - don't send any. Caller does not expect partial
@@ -208,53 +197,67 @@ static void mgos_pppos_status_cb(ppp_pcb *pcb, int err_code, void *arg) {
   }
 }
 
-static void free_cmds(struct mgos_pppos_data *pd) {
-  for (int i = 0; i < pd->num_cmds; i++) {
-    free(pd->cmds[i].cmd);
-  }
+static void free_cmds(struct mgos_pppos_data *pd, bool ok) {
+  struct mgos_pppos_cmd *cmds = pd->cmds;
+  int num_cmds = pd->num_cmds;
   pd->num_cmds = 0;
   pd->cmd_idx = 0;
-  free(pd->cmds);
   pd->cmds = NULL;
+  for (int i = 0; i < num_cmds; i++) {
+    struct mgos_pppos_cmd *cmd = &cmds[i];
+    if (cmd->cmd != NULL) {
+      free((void *) cmd->cmd);
+    } else if (cmd->cb != NULL) {
+      /* Finalizer */
+      cmd->cb(cmd->cb_arg, ok, mg_mk_str(NULL));
+    }
+  }
+  free(cmds);
+}
+
+static void add_cmd2(struct mgos_pppos_data *pd, char *cs,
+                     mgos_pppos_cmd_cb_t cb, void *cb_arg) {
+  struct mgos_pppos_cmd *cmd = NULL;
+  pd->cmds = (struct mgos_pppos_cmd *) realloc(
+      pd->cmds, (pd->num_cmds + 1) * sizeof(*cmd));
+  cmd = pd->cmds + pd->num_cmds;
+  cmd->cmd = cs;
+  cmd->cb = cb;
+  cmd->cb_arg = cb_arg;
+  pd->num_cmds++;
 }
 
 static void add_cmd(struct mgos_pppos_data *pd, mgos_pppos_cmd_cb_t cb,
                     const char *fmt, ...) {
   va_list ap;
-  struct mgos_pppos_cmd *cmd = NULL;
-  pd->cmds = (struct mgos_pppos_cmd *) realloc(
-      pd->cmds, (pd->num_cmds + 1) * sizeof(*cmd));
-  cmd = pd->cmds + pd->num_cmds;
+  char *cmd = NULL;
   va_start(ap, fmt);
-  mg_avprintf(&cmd->cmd, 0, fmt, ap);
-  cmd->cb = cb;
-  pd->num_cmds++;
+  mg_avprintf(&cmd, 0, fmt, ap);
   va_end(ap);
+  add_cmd2(pd, cmd, cb, pd);
 }
 
-static bool mgos_pppos_at_cb(struct mgos_pppos_data *pd, bool ok,
-                             struct mg_str data) {
+static bool mgos_pppos_at_cb(void *cb_arg, bool ok, struct mg_str data) {
   /* Some modems (Sequans) don't like +++ when there's no data session
    * and send "ERROR". Ignore it. */
-  (void) pd;
+  (void) cb_arg;
   (void) ok;
   (void) data;
   return true;
 }
 
-static bool mgos_pppos_ati_cb(struct mgos_pppos_data *pd, bool ok,
-                              struct mg_str data) {
+static bool mgos_pppos_ati_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   if (ok) {
     pd->ati_resp = mg_strdup(data);
   }
+  pd->baud_ok = false;
   return ok;
 }
 
-static bool mgos_pppos_gsn_cb(struct mgos_pppos_data *pd, bool ok,
-                              struct mg_str data) {
+static bool mgos_pppos_gsn_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   if (ok) {
-    /* We were able to read the response, so baud rate must be fine. */
-    pd->baud_ok = true;
     pd->imei = mg_strdup(data);
     LOG(LL_INFO, ("%.*s, IMEI: %.*s", (int) pd->ati_resp.len, pd->ati_resp.p,
                   (int) pd->imei.len, pd->imei.p));
@@ -262,8 +265,8 @@ static bool mgos_pppos_gsn_cb(struct mgos_pppos_data *pd, bool ok,
   return true;
 }
 
-bool mgos_pppos_ifr_cb(struct mgos_pppos_data *pd, bool ok,
-                       struct mg_str data) {
+static bool mgos_pppos_ifr_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   int uart_no = pd->cfg->uart_no;
   struct mgos_uart_config ucfg;
   if (!ok) return false;
@@ -280,8 +283,8 @@ bool mgos_pppos_ifr_cb(struct mgos_pppos_data *pd, bool ok,
   return ok;
 }
 
-bool mgos_pppos_ifc_cb(struct mgos_pppos_data *pd, bool ok,
-                       struct mg_str data) {
+static bool mgos_pppos_ifc_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   int uart_no = pd->cfg->uart_no;
   struct mgos_uart_config ucfg;
   if (!ok) return false;
@@ -295,14 +298,14 @@ bool mgos_pppos_ifc_cb(struct mgos_pppos_data *pd, bool ok,
   return ok;
 }
 
-static bool mgos_pppos_cimi_cb(struct mgos_pppos_data *pd, bool ok,
-                               struct mg_str data) {
+static bool mgos_pppos_cimi_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   if (ok) pd->imsi = mg_strdup(mg_strstrip(data));
   return true;
 }
 
-static bool mgos_pppos_ccid_cb(struct mgos_pppos_data *pd, bool ok,
-                               struct mg_str data) {
+static bool mgos_pppos_ccid_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   if (ok) {
     if (mg_str_starts_with(data, mg_mk_str("+CCID: "))) {
       data.p += 7;
@@ -313,8 +316,8 @@ static bool mgos_pppos_ccid_cb(struct mgos_pppos_data *pd, bool ok,
   return true;
 }
 
-static bool mgos_pppos_cpin_cb(struct mgos_pppos_data *pd, bool ok,
-                               struct mg_str data) {
+static bool mgos_pppos_cpin_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   if (!ok) {
     LOG(LL_ERROR, ("Error response to AT+CPIN. No SIM?"));
     return false;
@@ -343,8 +346,8 @@ static bool mgos_pppos_cpin_cb(struct mgos_pppos_data *pd, bool ok,
   return true;
 }
 
-static bool mgos_pppos_creg_cb(struct mgos_pppos_data *pd, bool ok,
-                               struct mg_str data) {
+static bool mgos_pppos_creg_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   if (!ok) {
     LOG(LL_WARN, ("%s response to AT+CREG, proceeding anyway", "Error"));
     return true;
@@ -393,8 +396,7 @@ static bool mgos_pppos_creg_cb(struct mgos_pppos_data *pd, bool ok,
   return ok;
 }
 
-static bool mgos_pppos_cops_cb(struct mgos_pppos_data *pd, bool ok,
-                               struct mg_str data) {
+static bool mgos_pppos_cops_cb(void *cb_arg, bool ok, struct mg_str data) {
   if (!ok) return true;
   const char *q1 = mg_strchr(data, '"');
   if (q1 == NULL) return true;
@@ -402,19 +404,25 @@ static bool mgos_pppos_cops_cb(struct mgos_pppos_data *pd, bool ok,
       mg_strchr(mg_mk_str_n(q1 + 1, data.len - (q1 - data.p) - 1), '"');
   if (q2 == NULL) return true;
   LOG(LL_INFO, ("Operator: %.*s", (int) (q2 - q1 - 1), q1 + 1));
-  (void) pd;
+  (void) cb_arg;
   return true;
 }
 
-static bool mgos_pppos_csq_cb(struct mgos_pppos_data *pd, bool ok,
-                              struct mg_str data) {
+static bool mgos_pppos_csq_cb(void *cb_arg, bool ok, struct mg_str data) {
   if (!ok) return true;
   int sq, ber;
   if (sscanf(data.p, "+CSQ: %d,%d", &sq, &ber) != 2) return true;
   if (sq < 0 || sq > 32) return true;
   LOG(LL_INFO, ("RSSI: %d", (-113 + sq * 2)));
-  (void) pd;
+  (void) cb_arg;
   return true;
+}
+
+static bool mgos_pppos_atd_cb(void *cb_arg, bool ok, struct mg_str data) {
+  struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
+  if (ok) pd->cmd_mode = false;
+  (void) data;
+  return ok;
 }
 
 struct ppp_set_auth_arg {
@@ -443,6 +451,7 @@ static void pppos_set_auth(ppp_pcb *pcb, u8_t authtype, const char *user,
 }
 
 static void mgos_pppos_poll_timer_cb(void *arg);
+static void mgos_pppos_uart_dispatcher(int uart_no, void *arg);
 
 static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
   int uart_no = pd->cfg->uart_no;
@@ -471,29 +480,42 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       mg_strfree(&pd->imei);
       mg_strfree(&pd->imsi);
       mg_strfree(&pd->iccid);
-
-      pd->attempt++;
-      pd->delay = 0;
-      pd->deadline = 0;
       pd->pppcb = NULL;
       memset(&pd->pppif, 0, sizeof(pd->pppif));
       pd->net_status = MGOS_NET_EV_DISCONNECTED;
       pd->net_status_last_reported = MGOS_NET_EV_DISCONNECTED;
-      free_cmds(pd);
-      if (!pd->baud_ok) mgos_pppos_try_baud_rate(pd);
+      if (pd->cfg->dtr_gpio >= 0) {
+        mgos_gpio_write(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
+      }
       if (pd->poll_timer_id == MGOS_INVALID_TIMER_ID) {
         pd->poll_timer_id = mgos_set_timer(100, MGOS_TIMER_REPEAT,
                                            mgos_pppos_poll_timer_cb, pd);
       }
-      if (pd->cfg->dtr_gpio >= 0) {
-        mgos_gpio_write(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
-      }
       mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTING);
-      if (pd->cfg->rst_gpio >= 0 &&
-          (pd->attempt == 1 || pd->cfg->rst_mode == 1)) {
-        pd->baud_ok = false;
-        pd->try_baud_idx = 0;
-        pd->try_baud_fc = 0;
+      mgos_pppos_set_state(pd, PPPOS_START_SEQ);
+      pd->attempt++;
+      break;
+    }
+    case PPPOS_START_SEQ: {
+      /* NB: entering this state must not disrupt existing connection
+       * but also needs to perform enough initialization if INIT was never done,
+       * such as if the modem never tried to connect to network and is only used
+       * to run user commands. */
+      pd->delay = 0;
+      pd->deadline = 0;
+      if (!pd->baud_ok) mgos_pppos_try_baud_rate(pd);
+      mgos_uart_set_dispatcher(pd->cfg->uart_no, mgos_pppos_uart_dispatcher,
+                               pd);
+      mgos_uart_set_rx_enabled(pd->cfg->uart_no, true);
+      if (pd->poll_timer_id == MGOS_INVALID_TIMER_ID) {
+        pd->poll_timer_id = mgos_set_timer(100, MGOS_TIMER_REPEAT,
+                                           mgos_pppos_poll_timer_cb, pd);
+      }
+      /* Reset modem if it's possible and we're not currently connected
+       * (executing in-band user command). */
+      if (pd->net_status == MGOS_NET_EV_DISCONNECTED &&
+          (pd->cfg->rst_gpio >= 0 &&
+           (pd->attempt == 1 || pd->cfg->rst_mode == 1))) {
         mgos_pppos_set_state(pd, PPPOS_RESET);
       } else {
         mgos_pppos_set_state(pd, PPPOS_BEGIN_WAIT);
@@ -506,6 +528,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       pd->deadline = now + (pd->cfg->rst_hold_ms / 1000.0);
       LOG(LL_INFO, ("Resetting modem..."));
       mgos_pppos_set_state(pd, PPPOS_RESET_HOLD);
+      pd->baud_ok = false;
+      pd->try_baud_idx = 0;
+      pd->try_baud_fc = 0;
       break;
     }
     case PPPOS_RESET_HOLD: {
@@ -522,13 +547,19 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
     case PPPOS_RESET_WAIT: {
       const double now = mgos_uptime();
       if (now < pd->deadline) break;
-      /* Note: not setting deadline to 0 so BEGIN goes straight to sending
-       * commands. */
-      mgos_pppos_set_state(pd, PPPOS_BEGIN);
+      /* Modem starts in command mode after reset. */
+      pd->cmd_mode = true;
+      mgos_pppos_set_state(pd, PPPOS_BEGIN_WAIT);
       break;
     }
     case PPPOS_BEGIN_WAIT: {
       const double now = mgos_uptime();
+      if (pd->cmd_mode) {
+        // Already in cmd mode, nothing to do.
+        mgos_pppos_set_state(pd, PPPOS_BEGIN);
+        pd->deadline = 0;
+        break;
+      }
       if (pd->deadline == 0) {
         /* Initial 1s pause before sending +++ */
         pd->deadline = now + 1.2;
@@ -539,25 +570,34 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         mgos_pppos_set_state(pd, PPPOS_BEGIN);
         pd->deadline = 0;
       }
+      if (pd->data.len > 0) {
+        /* If we are interrupting the stream to run user command,
+         * continue to forward the data to PPP for now. */
+        if (pd->cmd_success_state == PPPOS_RUN) {
+          pppos_input_tcpip(pd->pppcb, (u8_t *) pd->data.buf, pd->data.len);
+        }
+        mbuf_clear(&pd->data);
+      }
       break;
     }
     case PPPOS_BEGIN: {
       const double now = mgos_uptime();
-      if (pd->deadline == 0) {
+      if (!pd->cmd_mode && pd->deadline == 0) {
         mgos_pppos_at_cmd(uart_no, "+++");
         /* At least 1s after +++ */
         pd->deadline = now + 1.2;
-      } else if (now > pd->deadline) {
+      } else if (pd->cmd_mode || now > pd->deadline) {
         pd->deadline = 0;
-        if (pd->user_cmd) {
-          mgos_pppos_set_state(pd, PPPOS_USER_CMD);
+        if (pd->cmds != NULL) {
+          mgos_pppos_set_state(pd, PPPOS_CMD);
         } else {
+          pd->cmd_error_state = PPPOS_INIT;
+          pd->cmd_success_state = PPPOS_START_PPP;
           mgos_pppos_set_state(pd, PPPOS_SETUP);
         }
       }
       break;
     }
-
     case PPPOS_SETUP: {
       const char *apn = pd->cfg->apn;
       if (pd->cfg->dtr_gpio >= 0) {
@@ -597,52 +637,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       add_cmd(pd, mgos_pppos_csq_cb, "AT+CSQ");
       add_cmd(pd, NULL, "AT+CREG=0"); /* Disable unsolicited reports */
       add_cmd(pd, NULL, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg->apn);
-      add_cmd(pd, NULL, "ATDT*99***1#");
+      add_cmd(pd, mgos_pppos_atd_cb, "ATDT*99***1#");
       mgos_pppos_set_state(pd, PPPOS_CMD);
       (void) apn;
-      break;
-    }
-
-    case PPPOS_USER_CMD: {
-      const char *eol;
-      const double now = mgos_uptime();
-      struct mg_str s = mg_mk_str_n(pd->data.buf + pd->interrupted_data_len,
-                                    pd->data.len - pd->interrupted_data_len);
-      if (pd->deadline == 0) {
-        mgos_pppos_at_cmd(uart_no, pd->user_cmd);
-        pd->deadline = now + AT_CMD_TIMEOUT;
-        pd->interrupted_data_len = pd->data.len;
-      } else if (now > pd->deadline) {
-        LOG(LL_INFO, ("Command timed out: %s", pd->user_cmd));
-        free(pd->user_cmd);
-        pd->user_cmd = NULL;
-        mgos_pppos_set_state(pd, pd->interrupted_state);
-      } else if ((eol = mg_strchr(s, '\r')) != NULL) {
-        /* Trigger event */
-        struct mgos_pppos_cmd_resp data = {
-            .iface = pd->if_instance,
-            .request = mg_mk_str(pd->user_cmd),
-            .response = s,
-        };
-        mgos_event_trigger(MGOS_PPPOS_CMD_RESP, &data);
-        free(pd->user_cmd);
-        pd->user_cmd = NULL;
-        pd->data.len = pd->interrupted_data_len;
-        mgos_pppos_at_cmd(uart_no, "ATO");
-        mgos_pppos_set_state(pd, PPPOS_USER_CMD_DONE);
-        pd->deadline = now + AT_CMD_TIMEOUT;
-      }
-      break;
-    }
-    case PPPOS_USER_CMD_DONE: {
-      const double now = mgos_uptime();
-      mgos_pppos_set_state(pd, pd->interrupted_state);
-      struct mg_str s = mg_mk_str_n(pd->data.buf + pd->interrupted_data_len,
-                                    pd->data.len - pd->interrupted_data_len);
-      if (mg_strchr(s, '\r') == NULL && now < pd->deadline) break;
-      mgos_pppos_set_state(pd, pd->interrupted_state);
-      pd->data.len = pd->interrupted_data_len;
-      pd->deadline = 0;
       break;
     }
     case PPPOS_CMD: {
@@ -662,7 +659,8 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       if (now > pd->deadline) {
         LOG(LL_INFO, ("Command timed out: %s", cur_cmd->cmd));
         if (cur_cmd->cb != NULL) cur_cmd->cb(pd, false, mg_mk_str(NULL));
-        mgos_pppos_set_state(pd, PPPOS_INIT);
+        free_cmds(pd, false /* ok */);
+        mgos_pppos_set_state(pd, pd->cmd_error_state);
         pd->deadline = 0;
         break;
       }
@@ -680,6 +678,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         if (mg_vcmp(&l, "OK") == 0 ||
             mg_strstr(l, mg_mk_str("CONNECT")) == l.p) {
           cmd_done = true;
+          pd->cmd_mode = true;
           if (cur_cmd->cb != NULL) {
             cmd_res = cur_cmd->cb(pd, true, mg_strstrip(sd));
             break;
@@ -689,6 +688,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         } else if (mg_vcmp(&l, "ERROR") == 0 ||
                    mg_vcmp(&l, "NO CARRIER") == 0) {
           cmd_done = true;
+          pd->cmd_mode = true;
           if (cur_cmd->cb != NULL) {
             cmd_res = cur_cmd->cb(pd, false, mg_strstrip(sd));
           } else {
@@ -701,13 +701,15 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         }
       }
       if (cmd_done) {
+        /* We were able to read the response, so baud rate must be fine. */
+        pd->baud_ok = true;
         pd->deadline = 0;
         if (cmd_res) {
           pd->cmd_idx++;
-          if (pd->cmd_idx >= pd->num_cmds) {
-            free_cmds(pd);
-            mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTED);
-            mgos_pppos_set_state(pd, PPPOS_START_PPP);
+          if (pd->cmd_idx >= pd->num_cmds ||
+              pd->cmds[pd->cmd_idx].cmd == NULL) {
+            free_cmds(pd, true /* ok */);
+            mgos_pppos_set_state(pd, pd->cmd_success_state);
             mbuf_clear(&pd->data);
           } else {
             // Default delay of 50 ms.
@@ -717,14 +719,15 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
             mgos_pppos_set_state(pd, PPPOS_CMD);
           }
         } else {
-          /* Retry everything */
-          mgos_pppos_set_state(pd, PPPOS_INIT);
+          free_cmds(pd, false /* ok */);
+          mgos_pppos_set_state(pd, pd->cmd_error_state);
         }
       }
       break;
     }
     case PPPOS_START_PPP: {
       const char *user = pd->cfg->user;
+      mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTED);
       LOG(LL_INFO, ("Starting PPP, user '%s'", (user ? user : "")));
       mbuf_remove(&pd->data, pd->data.len);
       pd->pppcb = pppapi_pppos_create(&pd->pppif, mgos_pppos_send_cb,
@@ -749,6 +752,13 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       break;
     }
     case PPPOS_RUN: {
+      if (pd->cmd_mode) {
+        mgos_pppos_at_cmd(pd->cfg->uart_no, "ATO");
+        /* There will be response ("CONNECT") and we'll pass it up to PPP
+         * and it'll look like garbage, but it seems to be able
+         * to deal with it just fine. */
+        pd->cmd_mode = false;
+      }
       // We don't need polling anymore.
       if (pd->poll_timer_id != MGOS_INVALID_TIMER_ID) {
         mgos_clear_timer(pd->poll_timer_id);
@@ -756,7 +766,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       }
       if (pd->data.len > 0) {
         pppos_input_tcpip(pd->pppcb, (u8_t *) pd->data.buf, pd->data.len);
-        mbuf_remove(&pd->data, pd->data.len);
+        mbuf_clear(&pd->data);
       }
       break;
     }
@@ -771,7 +781,6 @@ static void mgos_pppos_dispatch(struct mgos_pppos_data *pd) {
 
 static void mgos_pppos_poll_timer_cb(void *arg) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) arg;
-  ;
   mgos_pppos_dispatch(pd);
 }
 
@@ -807,25 +816,6 @@ bool mgos_pppos_dev_get_ip_info(int if_instance,
             ip_addr_get_ip4_u32(&pd->pppif.netmask);
         ip_info->gw.sin_addr.s_addr = ip_addr_get_ip4_u32(&pd->pppif.gw);
       }
-      return true;
-    }
-  }
-  return false;
-}
-
-bool mgos_pppos_send_cmd(int iface, const char *req) {
-  struct mgos_pppos_data *pd;
-  SLIST_FOREACH(pd, &s_pds, next) {
-    if (pd->if_instance == iface && pd->user_cmd == NULL) {
-      mg_asprintf(&pd->user_cmd, 0, "%s", req);
-      if (pd->state == PPPOS_RUN) {
-        pd->interrupted_state = PPPOS_RUN;
-        pd->state = PPPOS_BEGIN_WAIT;
-      } else {
-        pd->interrupted_state = PPPOS_INIT;
-        pd->state = PPPOS_INIT;
-      }
-      mgos_uart_schedule_dispatcher(pd->cfg->uart_no, false);
       return true;
     }
   }
@@ -883,6 +873,33 @@ struct mg_str mgos_pppos_get_iccid(int if_instance) {
     if (pd->if_instance == if_instance) return mg_strdup(pd->iccid);
   }
   return mg_mk_str_n(NULL, 0);
+}
+
+bool mgos_pppos_run_cmds(int if_instance, const struct mgos_pppos_cmd *cmds) {
+  if (cmds == NULL) return false;
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    if (pd->if_instance == if_instance) break;
+  }
+  if (pd == NULL || pd->cmds != NULL) return false;
+  /* Insert ATE0 at the beginning. */
+  add_cmd2(pd, strdup("ATE0"), NULL, NULL);
+  const struct mgos_pppos_cmd *cmd = cmds;
+  while (true) {
+    if (cmd->cmd != NULL) {
+      add_cmd2(pd, strdup(cmd->cmd), cmd->cb, cmd->cb_arg);
+      cmd++;
+    } else {
+      add_cmd2(pd, NULL, cmd->cb, cmd->cb_arg);
+      break;
+    }
+  }
+  LOG(LL_DEBUG, ("Begin user command seq, state: %d", pd->state));
+  pd->cmd_success_state = pd->state;
+  pd->cmd_error_state = pd->state;
+  mgos_pppos_set_state(pd, PPPOS_START_SEQ);
+  mgos_pppos_dispatch_once(pd);
+  return true;
 }
 
 bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
@@ -964,9 +981,10 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
   if (pd->cfg->dtr_gpio >= 0) {
     mgos_gpio_setup_output(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
   }
+  /* We don't really know, so we assume we're not in command mode yet. */
+  pd->cmd_mode = false;
   SLIST_INSERT_HEAD(&s_pds, pd, next);
-  mgos_uart_set_dispatcher(cfg->uart_no, mgos_pppos_uart_dispatcher, pd);
-  mgos_uart_set_rx_enabled(cfg->uart_no, true);
+  mgos_pppos_dispatch(pd);
   return true;
 }
 
