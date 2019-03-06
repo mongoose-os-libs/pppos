@@ -40,6 +40,7 @@ bool mgos_pppos_dev_get_ip_info(int if_instance,
 
 enum mgos_pppos_event {
   MGOS_PPPOS_CMD_RESP = MGOS_PPPOS_BASE,  // ev_data: struct mgos_pppos_cmd_resp
+  MGOS_PPPOS_INIT,                        // ev_data: NULL
   MGOS_PPPOS_INFO,                        // ev_data: struct mgos_ppos_info_arg
 };
 

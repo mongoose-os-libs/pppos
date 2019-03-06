@@ -493,6 +493,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       }
       mgos_pppos_set_net_status(pd, MGOS_NET_EV_CONNECTING);
       mgos_pppos_set_state(pd, PPPOS_START_SEQ);
+      mgos_event_trigger(MGOS_PPPOS_INIT, NULL);
       pd->attempt++;
       break;
     }
