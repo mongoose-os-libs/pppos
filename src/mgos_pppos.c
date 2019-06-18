@@ -514,7 +514,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       }
       /* Reset modem if it's possible and we're not currently connected
        * (executing in-band user command). */
-      if (pd->net_status == MGOS_NET_EV_DISCONNECTED &&
+      if (pd->net_status == MGOS_NET_EV_CONNECTING &&
           (pd->cfg->rst_gpio >= 0 &&
            (pd->attempt == 1 || pd->cfg->rst_mode == 1))) {
         mgos_pppos_set_state(pd, PPPOS_RESET);
