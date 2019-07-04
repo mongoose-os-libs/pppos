@@ -687,7 +687,8 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
             cmd_res = true;
           }
         } else if (mg_vcmp(&l, "ERROR") == 0 ||
-                   mg_vcmp(&l, "NO CARRIER") == 0) {
+                   mg_vcmp(&l, "NO CARRIER") == 0 ||
+                   mg_str_starts_with(l, mg_mk_str("+CME ERROR:"))) {
           cmd_done = true;
           pd->cmd_mode = true;
           if (cur_cmd->cb != NULL) {
