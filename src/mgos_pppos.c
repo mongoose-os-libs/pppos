@@ -485,6 +485,8 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       mg_strfree(&pd->iccid);
       pd->pppcb = NULL;
       memset(&pd->pppif, 0, sizeof(pd->pppif));
+      pd->cmd_error_state = PPPOS_IDLE;
+      pd->cmd_success_state = PPPOS_IDLE;
       pd->net_status = MGOS_NET_EV_DISCONNECTED;
       pd->net_status_last_reported = MGOS_NET_EV_DISCONNECTED;
       if (pd->cfg->dtr_gpio >= 0) {
@@ -849,7 +851,14 @@ bool mgos_pppos_disconnect(int if_instance) {
       pd->pppcb = NULL;
       pppapi_close(pppcb, 0 /* no_carrier */);
     }
-    mgos_pppos_set_state(pd, PPPOS_IDLE);
+    pd->cmd_error_state = PPPOS_IDLE;
+    pd->cmd_success_state = PPPOS_IDLE;
+    // If we are not running a user command, go to IDLE immediately,
+    // otherwise finish the command sequence.
+    if (pd->state == PPPOS_INIT || pd->state == PPPOS_START_PPP ||
+        pd->state == PPPOS_RUN) {
+      mgos_pppos_set_state(pd, PPPOS_IDLE);
+    }
     mgos_pppos_dispatch(pd);
     return true;
   }
