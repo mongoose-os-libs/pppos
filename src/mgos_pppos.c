@@ -442,10 +442,13 @@ static err_t pppapi_do_ppp_set_auth(struct tcpip_api_call_data *m) {
 static void pppos_set_auth(ppp_pcb *pcb, u8_t authtype, const char *user,
                            const char *passwd) {
   struct ppp_set_auth_arg auth_arg = {
-      .authtype = authtype, .user = user, .passwd = passwd,
+      .authtype = authtype,
+      .user = user,
+      .passwd = passwd,
   };
   struct pppapi_msg msg = {
-      .msg.ppp = pcb, .msg.msg.ioctl.arg = &auth_arg,
+      .msg.ppp = pcb,
+      .msg.msg.ioctl.arg = &auth_arg,
   };
   tcpip_api_call(pppapi_do_ppp_set_auth, &msg.call);
 }
