@@ -151,7 +151,7 @@ static void mgos_pppos_set_net_status(struct mgos_pppos_data *pd,
 static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
                                 void *ctx) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) ctx;
-  if (pd->state != PPPOS_RUN) {
+  if (pd->state != PPPOS_RUN && pd->state != PPPOS_START_PPP) {
     /* Doing something else - e.g. running user command. */
     return 0;
   }
