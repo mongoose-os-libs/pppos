@@ -664,7 +664,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       struct mgos_pppos_cmd *cur_cmd = &pd->cmds[pd->cmd_idx];
       if (now > pd->deadline) {
         LOG(LL_INFO, ("Command timed out: %s", cur_cmd->cmd));
-        if (cur_cmd->cb != NULL) cur_cmd->cb(pd, false, mg_mk_str(NULL));
+        if (cur_cmd->cb != NULL) cur_cmd->cb(cur_cmd->cb_arg, false, mg_mk_str(NULL));
         free_cmds(pd, false /* ok */);
         mgos_pppos_set_state(pd, pd->cmd_error_state);
         pd->deadline = 0;
@@ -686,7 +686,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
           cmd_done = true;
           pd->cmd_mode = true;
           if (cur_cmd->cb != NULL) {
-            cmd_res = cur_cmd->cb(pd, true, mg_strstrip(sd));
+            cmd_res = cur_cmd->cb(cur_cmd->cb_arg, true, mg_strstrip(sd));
             break;
           } else {
             cmd_res = true;
@@ -697,7 +697,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
           cmd_done = true;
           pd->cmd_mode = true;
           if (cur_cmd->cb != NULL) {
-            cmd_res = cur_cmd->cb(pd, false, mg_strstrip(sd));
+            cmd_res = cur_cmd->cb(cur_cmd->cb_arg, false, mg_strstrip(sd));
           } else {
             LOG(LL_ERROR, ("Command failed: %s", cur_cmd->cmd));
             cmd_res = false;
