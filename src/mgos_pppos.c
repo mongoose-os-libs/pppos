@@ -151,7 +151,8 @@ static void mgos_pppos_set_net_status(struct mgos_pppos_data *pd,
 static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
                                 void *ctx) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) ctx;
-  if (pd->state != PPPOS_RUN && pd->state != PPPOS_START_PPP) {
+  if ((pd->state != PPPOS_RUN && pd->state != PPPOS_START_PPP) ||
+      pd->cmd_mode) {
     /* Doing something else - e.g. running user command. */
     return 0;
   }
@@ -664,7 +665,9 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       struct mgos_pppos_cmd *cur_cmd = &pd->cmds[pd->cmd_idx];
       if (now > pd->deadline) {
         LOG(LL_INFO, ("Command timed out: %s", cur_cmd->cmd));
-        if (cur_cmd->cb != NULL) cur_cmd->cb(cur_cmd->cb_arg, false, mg_mk_str(NULL));
+        if (cur_cmd->cb != NULL) {
+          cur_cmd->cb(cur_cmd->cb_arg, false, mg_mk_str(NULL));
+        }
         free_cmds(pd, false /* ok */);
         mgos_pppos_set_state(pd, pd->cmd_error_state);
         pd->deadline = 0;
