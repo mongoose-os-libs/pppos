@@ -2,8 +2,11 @@ author: mongoose-os
 description: PPPoS support
 type: lib
 version: 1.0
-includes: [ include ]
-sources: [ src ]
+includes:
+  - include
+
+sources:
+  - src
 
 libs:
   - origin: https://github.com/mongoose-os-libs/core
@@ -58,6 +61,7 @@ conds:
 tags:
   - hw
   - net
+  - js
   - docs:net:PPPoS
 
 manifest_version: 2017-09-29
