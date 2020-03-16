@@ -868,28 +868,34 @@ bool mgos_pppos_disconnect(int if_instance) {
   return false;
 }
 
-struct mg_str mgos_pppos_get_imei(int if_instance) {
+char* mgos_pppos_get_imei(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
-    if (pd->if_instance == if_instance) return mg_strdup(pd->imei);
+    if (pd->if_instance == if_instance) {
+        return pd->imei.p;
+    }
   }
-  return mg_mk_str_n(NULL, 0);
+  return NULL;
 }
 
-struct mg_str mgos_pppos_get_imsi(int if_instance) {
+char* mgos_pppos_get_imsi(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
-    if (pd->if_instance == if_instance) return mg_strdup(pd->imsi);
+    if (pd->if_instance == if_instance) {
+        return pd->imsi.p;
+    }
   }
-  return mg_mk_str_n(NULL, 0);
+  return NULL;
 }
 
-struct mg_str mgos_pppos_get_iccid(int if_instance) {
+char* mgos_pppos_get_iccid(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
-    if (pd->if_instance == if_instance) return mg_strdup(pd->iccid);
+    if (pd->if_instance == if_instance) {
+        return pd->iccid.p;
+    }
   }
-  return mg_mk_str_n(NULL, 0);
+  return NULL;
 }
 
 bool mgos_pppos_run_cmds(int if_instance, const struct mgos_pppos_cmd *cmds) {
