@@ -124,9 +124,9 @@ bool mgos_pppos_run_cmds(int if_instance, const struct mgos_pppos_cmd *cmds);
 //struct mg_str mgos_pppos_get_imsi(int if_instance);
 //struct mg_str mgos_pppos_get_iccid(int if_instance);
 
-const char* mgos_pppos_get_imei(int if_instance);
-const char* mgos_pppos_get_imsi(int if_instance);
-const char* mgos_pppos_get_iccid(int if_instance);
+char* mgos_pppos_get_imei(int if_instance);
+char* mgos_pppos_get_imsi(int if_instance);
+char* mgos_pppos_get_iccid(int if_instance);
 
 #ifdef __cplusplus
 }
