@@ -868,7 +868,7 @@ bool mgos_pppos_disconnect(int if_instance) {
   return false;
 }
 
-char* mgos_pppos_get_imei(int if_instance) {
+const char* mgos_pppos_get_imei(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance == if_instance) {
@@ -878,7 +878,7 @@ char* mgos_pppos_get_imei(int if_instance) {
   return NULL;
 }
 
-char* mgos_pppos_get_imsi(int if_instance) {
+const char* mgos_pppos_get_imsi(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance == if_instance) {
@@ -888,7 +888,7 @@ char* mgos_pppos_get_imsi(int if_instance) {
   return NULL;
 }
 
-char* mgos_pppos_get_iccid(int if_instance) {
+const char* mgos_pppos_get_iccid(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance == if_instance) {
