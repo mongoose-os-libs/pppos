@@ -81,7 +81,7 @@ struct mgos_pppos_data {
   enum mgos_net_event net_status;
   enum mgos_net_event net_status_last_reported;
   struct mg_str ati_resp, imei, imsi, iccid;
-
+  char imei_raw[32], imsi_raw[32], iccid_raw[32];
   SLIST_ENTRY(mgos_pppos_data) next;
 };
 
@@ -890,6 +890,39 @@ struct mg_str mgos_pppos_get_iccid(int if_instance) {
     if (pd->if_instance == if_instance) return mg_strdup(pd->iccid);
   }
   return mg_mk_str_n(NULL, 0);
+}
+
+char* mgos_pppos_get_imei_raw(int if_instance) {
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    if (pd->if_instance == if_instance) {
+        sprintf(pd->imei_raw, "%.*s",pd->imei.len, pd->imei.p);
+        return pd->imei_raw;
+    }
+  }
+  return NULL;
+}
+
+char* mgos_pppos_get_imsi_raw(int if_instance) {
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    if (pd->if_instance == if_instance) {
+        sprintf(pd->imsi_raw, "%.*s",pd->imsi.len, pd->imsi.p);
+        return pd->imsi_raw;
+    }
+  }
+  return NULL;
+}
+
+char* mgos_pppos_get_iccid_raw(int if_instance) {
+  struct mgos_pppos_data *pd;
+  SLIST_FOREACH(pd, &s_pds, next) {
+    if (pd->if_instance == if_instance) {
+        sprintf(pd->iccid_raw, "%.*s",pd->iccid.len, pd->iccid.p);
+        return pd->iccid_raw;
+    }
+  }
+  return NULL;
 }
 
 bool mgos_pppos_run_cmds(int if_instance, const struct mgos_pppos_cmd *cmds) {
