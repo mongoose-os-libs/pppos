@@ -124,6 +124,11 @@ struct mg_str mgos_pppos_get_imei(int if_instance);
 struct mg_str mgos_pppos_get_imsi(int if_instance);
 struct mg_str mgos_pppos_get_iccid(int if_instance);
 
+//raw
+char* mgos_pppos_get_imei_raw(int if_instance);
+char* mgos_pppos_get_imsi_raw(int if_instance);
+char* mgos_pppos_get_iccid_raw(int if_instance);
+
 #ifdef __cplusplus
 }
 #endif

@@ -892,7 +892,7 @@ struct mg_str mgos_pppos_get_iccid(int if_instance) {
   return mg_mk_str_n(NULL, 0);
 }
 
-const char* mgos_pppos_get_imei_js(int if_instance) {
+char* mgos_pppos_get_imei_raw(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance == if_instance) {
@@ -903,7 +903,7 @@ const char* mgos_pppos_get_imei_js(int if_instance) {
   return NULL;
 }
 
-const char* mgos_pppos_get_imsi_js(int if_instance) {
+char* mgos_pppos_get_imsi_raw(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance == if_instance) {
@@ -914,7 +914,7 @@ const char* mgos_pppos_get_imsi_js(int if_instance) {
   return NULL;
 }
 
-const char* mgos_pppos_get_iccid_js(int if_instance) {
+char* mgos_pppos_get_iccid_raw(int if_instance) {
   struct mgos_pppos_data *pd;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance == if_instance) {

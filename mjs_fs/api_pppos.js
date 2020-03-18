@@ -1,7 +1,7 @@
 let PPPOS = {
-  _imei: ffi('const char* mgos_pppos_get_imei_raw(int)'),
-  _imsi: ffi('const char* mgos_pppos_get_imsi_raw(int)'),
-  _iccid: ffi('const char* mgos_pppos_get_iccid_raw(int)'),
+  _imei: ffi('char* mgos_pppos_get_imei_raw(int)'),
+  _imsi: ffi('char* mgos_pppos_get_imsi_raw(int)'),
+  _iccid: ffi('char* mgos_pppos_get_iccid_raw(int)'),
 
   imei: function() {
     return this._imei(0);
