@@ -49,6 +49,7 @@ struct mgos_pppos_info_arg {
   struct mg_str imei;
   struct mg_str imsi;
   struct mg_str iccid;
+  struct mg_str oper;
 };
 
 /* Create PPPoS interface instance.
@@ -77,6 +78,7 @@ struct mgos_pppos_cmd {
   const char *cmd;
   mgos_pppos_cmd_cb_t cb;
   void *cb_arg;
+  float timeout;
 };
 
 /*
