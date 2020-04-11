@@ -120,7 +120,7 @@ static void mgos_pppos_try_baud_rate(struct mgos_pppos_data *pd) {
 }
 
 static void mgos_pppos_at_cmd(int uart_no, const char *cmd) {
-  LOG(LL_VERBOSE_DEBUG, (">> %s", cmd));
+  LOG(LL_DEBUG, (">> %s", cmd));
   mgos_uart_write(uart_no, cmd, strlen(cmd));
   if (strcmp(cmd, "+++") != 0) {
     mgos_uart_write(uart_no, "\r\n", 2);
@@ -758,6 +758,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         pppapi_free(pd->pppcb);
         mgos_pppos_set_state(pd, PPPOS_INIT);
       }
+      pd->deadline = mgos_uptime() + 10;
       mgos_pppos_set_state(pd, PPPOS_RUN);
       break;
     }
@@ -769,14 +770,22 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
          * to deal with it just fine. */
         pd->cmd_mode = false;
       }
-      // We don't need polling anymore.
-      if (pd->poll_timer_id != MGOS_INVALID_TIMER_ID) {
-        mgos_clear_timer(pd->poll_timer_id);
-        pd->poll_timer_id = MGOS_INVALID_TIMER_ID;
-      }
       if (pd->data.len > 0) {
         pppos_input_tcpip(pd->pppcb, (u8_t *) pd->data.buf, pd->data.len);
         mbuf_clear(&pd->data);
+      }
+      if (pd->net_status != MGOS_NET_EV_IP_ACQUIRED) {
+        if (mgos_uptime() > pd->deadline && pd->pppcb != NULL) {
+          LOG(LL_ERROR, ("Failed to acquire IP"));
+          ppp_pcb *pppcb = pd->pppcb;
+          pd->pppcb = NULL;
+          pppapi_close(pppcb, 1 /* no_carrier */);
+          mgos_pppos_set_state(pd, PPPOS_INIT);
+        }
+      } else if (pd->poll_timer_id != MGOS_INVALID_TIMER_ID) {
+        // We don't need polling anymore.
+        mgos_clear_timer(pd->poll_timer_id);
+        pd->poll_timer_id = MGOS_INVALID_TIMER_ID;
       }
       break;
     }
