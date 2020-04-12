@@ -415,6 +415,7 @@ static bool mgos_pppos_creg_cb(void *cb_arg, bool ok, struct mg_str data) {
 static bool mgos_pppos_cops_set_cb(void *cb_arg, bool ok, struct mg_str data) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
   pd->cops_attempts--;
+  (void) data;
   return ok;
 }
 
