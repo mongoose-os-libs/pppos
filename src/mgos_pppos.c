@@ -40,8 +40,8 @@
 #include "mgos_utils.h"
 
 #define AT_CMD_TIMEOUT 2.0
-#define COPS_ATTEMPTS 1
 #define COPS_TIMEOUT 60
+#define COPS_AUTO_TIMEOUT 600
 
 enum mgos_pppos_state {
   PPPOS_IDLE = 0,
@@ -69,7 +69,8 @@ struct mgos_pppos_data {
   double delay, deadline;
   bool baud_ok, cmd_mode;
   int attempt;
-  int cops_attempts;
+  bool try_cops, cops_set;
+  double creg_start;
   mgos_timer_id poll_timer_id;
 
   struct mgos_pppos_cmd *cmds;
@@ -148,7 +149,7 @@ static void mgos_pppos_net_status_cb(void *arg) {
       mgos_sys_config_set_pppos_last_oper(pd->oper.p);
       mgos_sys_config_save(&mgos_sys_config, false, NULL);
     }
-    pd->cops_attempts = COPS_ATTEMPTS;
+    pd->try_cops = true;
   }
 }
 
@@ -393,8 +394,8 @@ static bool mgos_pppos_creg_cb(void *cb_arg, bool ok, struct mg_str data) {
       sts = "unknown";
       break;
     case 5:
-      ok = true;
       sts = "roaming";
+      ok = true;
       break;
     default:
       sts = "???";
@@ -403,10 +404,18 @@ static bool mgos_pppos_creg_cb(void *cb_arg, bool ok, struct mg_str data) {
   if (ok) {
     LOG(LL_ERROR, ("Connected to mobile network (%s)", sts));
   } else {
-    LOG(LL_ERROR, ("Not connected to mobile network, status %d (%s)", st, sts));
-    pd->cmd_idx--;
-    pd->delay = mgos_uptime() + 1.0;
-    ok = true;
+    int timeout = (pd->cops_set ? COPS_TIMEOUT : COPS_AUTO_TIMEOUT);
+    LOG(LL_ERROR, ("Not connected to mobile network, status %d (%s) %d", st, sts, timeout));
+    if (pd->creg_start == 0) {
+      pd->creg_start = mgos_uptime();
+    }
+    if (mgos_uptime() - pd->creg_start < timeout) {
+      pd->cmd_idx--;
+      pd->delay = mgos_uptime() + 2.0;
+      ok = true;
+    } else {
+      LOG(LL_ERROR, ("Timed out waiting for connection"));
+    }
   }
   (void) sts;
   return ok;
@@ -414,7 +423,11 @@ static bool mgos_pppos_creg_cb(void *cb_arg, bool ok, struct mg_str data) {
 
 static bool mgos_pppos_cops_set_cb(void *cb_arg, bool ok, struct mg_str data) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) cb_arg;
-  pd->cops_attempts--;
+  if (!ok) {
+    LOG(LL_ERROR, ("Error setting network operator: %.*s", (int) data.len, data.p));
+  }
+  pd->try_cops = false;
+  pd->cops_set = ok;
   (void) data;
   return ok;
 }
@@ -526,6 +539,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       pd->cmd_success_state = PPPOS_IDLE;
       pd->net_status = MGOS_NET_EV_DISCONNECTED;
       pd->net_status_last_reported = MGOS_NET_EV_DISCONNECTED;
+      pd->creg_start = 0;
       if (pd->cfg->dtr_gpio >= 0) {
         mgos_gpio_write(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
       }
@@ -652,7 +666,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       add_cmd(pd, mgos_pppos_at_cb, 0, "AT");
       add_cmd(pd, NULL, 0, "ATH");
       add_cmd(pd, NULL, 0, "ATE0");
-      add_cmd(pd, mgos_pppos_ati_cb, 0, "ATI");
+      add_cmd(pd, NULL, 0, "AT+CFUN=0"); /* Offline */
       if (!pd->baud_ok) {
         struct mgos_uart_config ucfg;
         bool need_ifr = true, need_ifc = true;
@@ -669,13 +683,15 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
           add_cmd(pd, mgos_pppos_ifc_cb, 0, "AT+IFC=%d,%d", ifc, ifc);
         }
       }
+      add_cmd(pd, NULL, 0, "AT+CFUN=1"); /* Full functionality */
+      add_cmd(pd, mgos_pppos_ati_cb, 0, "ATI");
       add_cmd(pd, mgos_pppos_gsn_cb, 0, "AT+GSN");
       add_cmd(pd, mgos_pppos_cimi_cb, 0, "AT+CIMI");
       add_cmd(pd, mgos_pppos_ccid_cb, 0, "AT+CCID");
       add_cmd(pd, mgos_pppos_cpin_cb, 0, "AT+CPIN?");
-      add_cmd(pd, NULL, 0, "AT+CFUN=1"); /* Full functionality */
+      add_cmd(pd, NULL, 0, "AT+CREG=0"); /* Disable unsolicited reports */
       bool ok = false;
-      if (pd->cfg->last_oper != NULL && pd->cops_attempts > 0) {
+      if (pd->cfg->last_oper != NULL && pd->try_cops) {
         /* Try last used first, fall back to auto if unsuccessful. */
         LOG(LL_INFO, ("Trying to connect to %s", pd->cfg->last_oper));
         const char *comma = strchr(pd->cfg->last_oper, ',');
@@ -689,7 +705,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       if (!ok) {
         /* Auto mode */
         LOG(LL_INFO, ("Automatic operator selection"));
-        add_cmd(pd, NULL, COPS_TIMEOUT, "AT+COPS=0");
+        add_cmd(pd, NULL, COPS_AUTO_TIMEOUT, "AT+COPS=0");
       }
       add_cmd(pd, mgos_pppos_creg_cb, 0, "AT+CREG?");
       add_cmd(pd, NULL, 0, "AT+COPS=3,2"); /* Numeric operator format. */
@@ -697,7 +713,6 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       add_cmd(pd, NULL, 0, "AT+COPS=3,0"); /* Long alphanumeric format. */
       add_cmd(pd, mgos_pppos_cops_cb, 0, "AT+COPS?");
       add_cmd(pd, mgos_pppos_csq_cb, 0, "AT+CSQ");
-      add_cmd(pd, NULL, 0, "AT+CREG=0"); /* Disable unsolicited reports */
       add_cmd(pd, NULL, 0, "AT+CGDCONT=1,\"IP\",\"%s\"", pd->cfg->apn);
       add_cmd(pd, mgos_pppos_atd_cb, 0, "ATDT*99***1#");
       mgos_pppos_set_state(pd, PPPOS_CMD);
@@ -1067,7 +1082,7 @@ bool mgos_pppos_create(const struct mgos_config_pppos *cfg, int if_instance) {
   pd->cmd_mode = false;
   SLIST_INSERT_HEAD(&s_pds, pd, next);
   mgos_pppos_dispatch(pd);
-  pd->cops_attempts = COPS_ATTEMPTS;
+  pd->try_cops = true;
   return true;
 }
 
