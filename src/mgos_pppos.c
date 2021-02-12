@@ -661,10 +661,6 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
     case PPPOS_SETUP: {
       const char *apn = pd->cfg->apn;
       const char *reg_cmd = mgos_sys_config_get_pppos_reg_cmd();
-      char reg_set_cmd[strlen(reg_cmd) + 5];
-      sprintf(reg_set_cmd, "AT+%s=0", reg_cmd);
-      char reg_read_cmd[strlen(reg_cmd) + 4];
-      sprintf(reg_read_cmd, "AT+%s?", reg_cmd);
       if (pd->cfg->dtr_gpio >= 0) {
         mgos_gpio_write(pd->cfg->dtr_gpio, pd->cfg->dtr_act);
       }
@@ -697,7 +693,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       add_cmd(pd, mgos_pppos_cimi_cb, 0, "AT+CIMI");
       add_cmd(pd, mgos_pppos_ccid_cb, 0, "AT+CCID");
       add_cmd(pd, mgos_pppos_cpin_cb, 0, "AT+CPIN?");
-      add_cmd(pd, NULL, 0, reg_set_cmd); /* Disable unsolicited reports */
+      add_cmd(pd, NULL, 0, "AT+%s=0", reg_cmd); /* Disable unsolicited reports */
       bool ok = false;
       if (pd->cfg->last_oper != NULL && pd->try_cops) {
         /* Try last used first, fall back to auto if unsuccessful. */
@@ -715,7 +711,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         LOG(LL_INFO, ("Automatic operator selection"));
         add_cmd(pd, NULL, COPS_AUTO_TIMEOUT, "AT+COPS=0");
       }
-      add_cmd(pd, mgos_pppos_creg_cb, 0, reg_read_cmd);
+      add_cmd(pd, mgos_pppos_creg_cb, 0, "AT+%s?", reg_cmd);
       add_cmd(pd, NULL, 0, "AT+COPS=3,2"); /* Numeric operator format. */
       add_cmd(pd, mgos_pppos_cops_cb, 0, "AT+COPS?");
       add_cmd(pd, NULL, 0, "AT+COPS=3,0"); /* Long alphanumeric format. */
