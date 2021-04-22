@@ -39,6 +39,7 @@ config_schema:
   - ["pppos.hexdump_enable", "b", false, {title: "Dump all the data sent over UART to stderr"}]
   - ["pppos.last_oper", "s", "", {title: "This field is used to store last successfully connected operator"}]
   - ["pppos.reg_cmd", "s", "CREG", {title: "AT command used for setting and checking network registration. CREG(default), CGREG, CEREG"}]
+  - ["pppos.cfun_cycle", "b", true, {title: "Set CFUN to 0, then to 1"}]
 
 conds:
   # ESP32 sets LwIP options via sdkconfig, for other platforms use cdefs directly.
