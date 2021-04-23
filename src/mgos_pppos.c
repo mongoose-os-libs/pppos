@@ -167,7 +167,8 @@ static void mgos_pppos_set_net_status(struct mgos_pppos_data *pd,
 static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
                                 void *ctx) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) ctx;
-  if ((pd->state != PPPOS_RUN && pd->state != PPPOS_START_PPP && pd->state != PPPOS_CLOSING) ||
+  if ((pd->state != PPPOS_RUN && pd->state != PPPOS_START_PPP &&
+       pd->state != PPPOS_CLOSING) ||
       pd->cmd_mode) {
     /* Doing something else - e.g. running user command. */
     return 0;
@@ -201,8 +202,11 @@ static void mgos_pppos_status_cb(ppp_pcb *pcb, int err_code, void *arg) {
       /* User (us) called close, do not retry. */
       ppp_free(pcb);
       /* if reconnect is set, go to INIT. Otherwise go to IDLE */
-      if(pd->reconnect) mgos_pppos_set_state(pd, PPPOS_INIT);
-      else mgos_pppos_set_state(pd, PPPOS_IDLE);
+      if (pd->reconnect) {
+        mgos_pppos_set_state(pd, PPPOS_INIT);
+      } else {
+        mgos_pppos_set_state(pd, PPPOS_IDLE);
+      }
       pd->pppcb = NULL;
       break;
     }
