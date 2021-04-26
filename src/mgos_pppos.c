@@ -57,7 +57,7 @@ enum mgos_pppos_state {
   PPPOS_CMD_RESP = 9,
   PPPOS_START_PPP = 10,
   PPPOS_RUN = 11,
-  PPPOS_CLOSING = 13
+  PPPOS_CLOSING = 13,
 };
 
 struct mgos_pppos_cmd;
