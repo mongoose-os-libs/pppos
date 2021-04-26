@@ -202,11 +202,7 @@ static void mgos_pppos_status_cb(ppp_pcb *pcb, int err_code, void *arg) {
       /* User (us) called close, do not retry. */
       ppp_free(pcb);
       /* if reconnect is set, go to INIT. Otherwise go to IDLE */
-      if (pd->reconnect) {
-        mgos_pppos_set_state(pd, PPPOS_INIT);
-      } else {
-        mgos_pppos_set_state(pd, PPPOS_IDLE);
-      }
+      mgos_pppos_set_state(pd, (pd->reconnect ? PPPOS_INIT : PPPOS_IDLE));
       pd->pppcb = NULL;
       break;
     }
