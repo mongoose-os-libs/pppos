@@ -57,6 +57,7 @@ enum mgos_pppos_state {
   PPPOS_CMD_RESP = 9,
   PPPOS_START_PPP = 10,
   PPPOS_RUN = 11,
+  PPPOS_CLOSING = 13,
 };
 
 struct mgos_pppos_cmd;
@@ -85,6 +86,7 @@ struct mgos_pppos_data {
   enum mgos_net_event net_status;
   enum mgos_net_event net_status_last_reported;
   struct mg_str ati_resp, imei, imsi, iccid, oper;
+  bool reconnect;
 
   SLIST_ENTRY(mgos_pppos_data) next;
 };
@@ -165,7 +167,8 @@ static void mgos_pppos_set_net_status(struct mgos_pppos_data *pd,
 static u32_t mgos_pppos_send_cb(ppp_pcb *pcb, u8_t *data, u32_t len,
                                 void *ctx) {
   struct mgos_pppos_data *pd = (struct mgos_pppos_data *) ctx;
-  if ((pd->state != PPPOS_RUN && pd->state != PPPOS_START_PPP) ||
+  if ((pd->state != PPPOS_RUN && pd->state != PPPOS_START_PPP &&
+       pd->state != PPPOS_CLOSING) ||
       pd->cmd_mode) {
     /* Doing something else - e.g. running user command. */
     return 0;
@@ -198,6 +201,9 @@ static void mgos_pppos_status_cb(ppp_pcb *pcb, int err_code, void *arg) {
     case PPPERR_USER: {
       /* User (us) called close, do not retry. */
       ppp_free(pcb);
+      /* if reconnect is set, go to INIT. Otherwise go to IDLE */
+      mgos_pppos_set_state(pd, (pd->reconnect ? PPPOS_INIT : PPPOS_IDLE));
+      pd->pppcb = NULL;
       break;
     }
     default: {
@@ -546,6 +552,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       pd->net_status = MGOS_NET_EV_DISCONNECTED;
       pd->net_status_last_reported = MGOS_NET_EV_DISCONNECTED;
       pd->creg_start = 0;
+      pd->reconnect = false;
       if (pd->cfg->dtr_gpio >= 0) {
         mgos_gpio_write(pd->cfg->dtr_gpio, !pd->cfg->dtr_act);
       }
@@ -858,9 +865,10 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         if (mgos_uptime() > pd->deadline && pd->pppcb != NULL) {
           LOG(LL_ERROR, ("Failed to acquire IP"));
           ppp_pcb *pppcb = pd->pppcb;
-          pd->pppcb = NULL;
           pppapi_close(pppcb, 1 /* no_carrier */);
-          mgos_pppos_set_state(pd, PPPOS_INIT);
+          // Try to reconnect after closing
+          pd->reconnect = true;
+          mgos_pppos_set_state(pd, PPPOS_CLOSING);
         }
       } else if (pd->poll_timer_id != MGOS_INVALID_TIMER_ID) {
         // We don't need polling anymore.
@@ -868,6 +876,17 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
         pd->poll_timer_id = MGOS_INVALID_TIMER_ID;
       }
       break;
+    }
+    case PPPOS_CLOSING: {
+      // Start polling
+      if (pd->poll_timer_id == MGOS_INVALID_TIMER_ID) {
+        pd->poll_timer_id = mgos_set_timer(100, MGOS_TIMER_REPEAT,
+                                           mgos_pppos_poll_timer_cb, pd);
+      }
+      if (pd->data.len > 0) {
+        pppos_input_tcpip(pd->pppcb, (u8_t *) pd->data.buf, pd->data.len);
+        mbuf_clear(&pd->data);
+      }
     }
   }
 }
@@ -935,21 +954,48 @@ bool mgos_pppos_connect(int if_instance) {
 
 bool mgos_pppos_disconnect(int if_instance) {
   struct mgos_pppos_data *pd;
+  bool closing;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance != if_instance) continue;
     if (pd->state == PPPOS_IDLE) return true;
+    closing = false;
     if (pd->pppcb != NULL) {
       ppp_pcb *pppcb = pd->pppcb;
       pd->pppcb = NULL;
       pppapi_close(pppcb, 0 /* no_carrier */);
+      closing = true;
     }
-    pd->cmd_error_state = PPPOS_IDLE;
-    pd->cmd_success_state = PPPOS_IDLE;
-    // If we are not running a user command, go to IDLE immediately,
+    switch (pd->state) {
+      case PPPOS_INIT:
+      case PPPOS_START_SEQ:
+      case PPPOS_RESET:
+      case PPPOS_RESET_HOLD:
+      case PPPOS_RESET_WAIT:
+      case PPPOS_BEGIN:
+      case PPPOS_BEGIN_WAIT:
+      case PPPOS_SETUP: {
+        pd->cmd_error_state = PPPOS_IDLE;
+        pd->cmd_success_state = PPPOS_IDLE;
+        break;
+      }
+      case PPPOS_CMD:
+      case PPPOS_CMD_RESP:
+      case PPPOS_START_PPP:
+      case PPPOS_RUN: {
+        pd->cmd_error_state = closing ? PPPOS_CLOSING : PPPOS_IDLE;
+        pd->cmd_success_state = closing ? PPPOS_CLOSING : PPPOS_IDLE;
+        break;
+      }
+      case PPPOS_IDLE:
+      case PPPOS_CLOSING: {
+        break;
+      }
+    }
+    // If we are not running a user command, go to CLOSING immediately,
     // otherwise finish the command sequence.
     if (pd->state == PPPOS_INIT || pd->state == PPPOS_START_PPP ||
         pd->state == PPPOS_RUN) {
-      mgos_pppos_set_state(pd, PPPOS_IDLE);
+      mgos_pppos_set_state(pd, PPPOS_CLOSING);
     }
     mgos_pppos_dispatch(pd);
     return true;
