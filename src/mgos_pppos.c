@@ -952,16 +952,43 @@ bool mgos_pppos_connect(int if_instance) {
 
 bool mgos_pppos_disconnect(int if_instance) {
   struct mgos_pppos_data *pd;
+  bool closing;
   SLIST_FOREACH(pd, &s_pds, next) {
     if (pd->if_instance != if_instance) continue;
     if (pd->state == PPPOS_IDLE) return true;
+    closing = false;
     if (pd->pppcb != NULL) {
       ppp_pcb *pppcb = pd->pppcb;
       pd->pppcb = NULL;
       pppapi_close(pppcb, 0 /* no_carrier */);
+      closing = true;
     }
-    pd->cmd_error_state = PPPOS_CLOSING;
-    pd->cmd_success_state = PPPOS_CLOSING;
+    switch (pd->state) {
+      case PPPOS_INIT:
+      case PPPOS_START_SEQ:
+      case PPPOS_RESET:
+      case PPPOS_RESET_HOLD:
+      case PPPOS_RESET_WAIT:
+      case PPPOS_BEGIN:
+      case PPPOS_BEGIN_WAIT:
+      case PPPOS_SETUP: {
+        pd->cmd_error_state = PPPOS_IDLE;
+        pd->cmd_success_state = PPPOS_IDLE;
+        break;
+      }
+      case PPPOS_CMD:
+      case PPPOS_CMD_RESP:
+      case PPPOS_START_PPP:
+      case PPPOS_RUN: {
+        pd->cmd_error_state = closing ? PPPOS_CLOSING : PPPOS_IDLE;
+        pd->cmd_success_state = closing ? PPPOS_CLOSING : PPPOS_IDLE;
+        break;
+      }
+      case PPPOS_IDLE:
+      case PPPOS_CLOSING: {
+        break;
+      }
+    }
     // If we are not running a user command, go to CLOSING immediately,
     // otherwise finish the command sequence.
     if (pd->state == PPPOS_INIT || pd->state == PPPOS_START_PPP ||
