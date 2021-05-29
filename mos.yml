@@ -6,8 +6,8 @@ includes: [ include ]
 sources: [ src ]
 
 libs:
-  - origin: https://github.com/mongoose-os-libs/core
-  - origin: https://github.com/mongoose-os-libs/lwip
+  - location: https://github.com/mongoose-os-libs/core
+  - location: https://github.com/mongoose-os-libs/lwip
 
 config_schema:
   - ["pppos.enable", "b", false, {title: "Enable PPPoS"}]
