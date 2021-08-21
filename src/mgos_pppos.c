@@ -839,6 +839,7 @@ static void mgos_pppos_dispatch_once(struct mgos_pppos_data *pd) {
       }
       pd->pppcb->settings.lcp_echo_interval = pd->cfg->echo_interval;
       pd->pppcb->settings.lcp_echo_fails = pd->cfg->echo_fails;
+      ppp_set_usepeerdns(pd->pppcb, true); /* Request DNS server. */
       err_t err = pppapi_connect(pd->pppcb, 0 /* holdoff */);
       if (err != ERR_OK) {
         LOG(LL_ERROR, ("pppapi_connect failed: %d", err));
@@ -933,6 +934,7 @@ bool mgos_pppos_dev_get_ip_info(int if_instance,
         ip_info->netmask.sin_addr.s_addr =
             ip_addr_get_ip4_u32(&pd->pppif.netmask);
         ip_info->gw.sin_addr.s_addr = ip_addr_get_ip4_u32(&pd->pppif.gw);
+        ip_info->dns.sin_addr.s_addr = pd->pppcb->dns_server;
       }
       return true;
     }
